@@ -10,3 +10,9 @@ pandas-market-calendars
 prophet
 plotly
 catboost
+scikit-learn >=1.8.0
+lightgbm >=4.6.0
+matplotlib
+streamlit
+scipy
+joblib
