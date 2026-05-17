@@ -9,3 +9,4 @@ yfinance
 pandas-market-calendars
 prophet
 plotly
+catboost
