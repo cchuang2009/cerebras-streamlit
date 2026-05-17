@@ -1,0 +1,11 @@
+
+streamlit
+pandas
+polars
+numpy
+plotly
+requests
+yfinance
+pandas-market-calendars
+prophet
+plotly

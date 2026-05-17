@@ -1,0 +1,1173 @@
+"""
+CBRS Multi-Timeframe Predictor — Streamlit App
+pip install streamlit plotly yfinance catboost scikit-learn pytz pandas numpy prophet
+Run: streamlit run cbrs_app.py
+"""
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+import pytz
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime, timedelta, date
+
+import streamlit as st
+from catboost import CatBoostClassifier, Pool
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from sklearn.utils.class_weight import compute_class_weight
+
+# Prophet — graceful fallback if not installed
+try:
+    from prophet import Prophet
+    PROPHET_AVAILABLE = True
+except ImportError:
+    PROPHET_AVAILABLE = False
+
+# ─────────────────────────────────────────────
+# PAGE CONFIG
+# ─────────────────────────────────────────────
+st.set_page_config(
+    page_title="CBRS MTF Predictor",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'DM Sans', sans-serif;
+    background-color: #0a0e1a;
+    color: #e2e8f0;
+}
+h1, h2, h3 { font-family: 'Space Mono', monospace; }
+
+.metric-card {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 16px 20px;
+    text-align: center;
+}
+.metric-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #64748b;
+    font-family: 'Space Mono', monospace;
+}
+.metric-value {
+    font-size: 28px;
+    font-weight: 700;
+    font-family: 'Space Mono', monospace;
+    margin-top: 4px;
+}
+.trend-breakout { color: #22c55e; }
+.trend-crash    { color: #ef4444; }
+.trend-squeeze  { color: #f59e0b; }
+.trend-uncertain{ color: #94a3b8; }
+
+.signal-badge {
+    display: inline-block;
+    padding: 4px 14px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-family: 'Space Mono', monospace;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+.badge-valid   { background:#14532d; color:#22c55e; border:1px solid #22c55e; }
+.badge-invalid { background:#1c1917; color:#94a3b8; border:1px solid #475569; }
+
+div[data-testid="stSidebar"] {
+    background: #0f172a;
+    border-right: 1px solid #1e293b;
+}
+</style>
+""", unsafe_allow_html=True)
+
+ET = pytz.timezone("America/New_York")
+CONFIDENCE_THRESHOLD = 0.45
+
+# ─────────────────────────────────────────────
+# DATA LAYER
+# ─────────────────────────────────────────────
+
+def _clean(df: pd.DataFrame) -> pd.DataFrame:
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [c[0].lower() for c in df.columns]
+    else:
+        df.columns = [c.lower() for c in df.columns]
+    df.index = pd.to_datetime(df.index)
+    if df.index.tzinfo is None:
+        df.index = df.index.tz_localize("UTC")
+    df.index = df.index.tz_convert(ET)
+    return df.sort_index()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_1m(ticker: str, start: str, end: str) -> pd.DataFrame:
+    df = yf.download(
+        ticker, start=start, end=end,
+        interval="1m", progress=False,
+        auto_adjust=True, multi_level_index=False,
+        prepost=True,
+    )
+    if df.empty:
+        return pd.DataFrame()
+    return _clean(df)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_daily(ticker: str, start: str, end: str) -> pd.DataFrame:
+    df = yf.download(
+        ticker, start=start, end=end,
+        interval="1d", progress=False,
+        auto_adjust=True, multi_level_index=False,
+    )
+    if df.empty:
+        return pd.DataFrame()
+    return _clean(df)
+
+
+# ─────────────────────────────────────────────
+# FEATURE ENGINE
+# ─────────────────────────────────────────────
+
+def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
+    agg = {"open":"first","high":"max","low":"min","close":"last","volume":"sum"}
+    return (df[list(agg)].resample(rule, label="left", closed="left")
+            .agg(agg).dropna())
+
+
+def add_indicators(df: pd.DataFrame, pfx: str) -> pd.DataFrame:
+    f = df.copy()
+    c, h, l, o, v = f["close"], f["high"], f["low"], f["open"], f["volume"]
+
+    for n in [1, 3, 5, 10]:
+        f[f"{pfx}_ret{n}"] = c.pct_change(n)
+
+    if pfx != "1d":
+        tp = (h + l + c) / 3
+        dk = f.index.normalize()
+        f[f"{pfx}_vwap"]      = (tp * v).groupby(dk).cumsum() / (v.groupby(dk).cumsum() + 1e-9)
+        f[f"{pfx}_vwap_dist"] = (c - f[f"{pfx}_vwap"]) / (f[f"{pfx}_vwap"] + 1e-9)
+
+    tr = pd.concat([(h-l),(h-c.shift()).abs(),(l-c.shift()).abs()],axis=1).max(axis=1)
+    f[f"{pfx}_atr"]      = tr.rolling(14, min_periods=1).mean()
+    f[f"{pfx}_atr_pct"]  = f[f"{pfx}_atr"] / (c + 1e-9)
+    f[f"{pfx}_atr_ratio"]= (h - l) / (f[f"{pfx}_atr"] + 1e-9)
+
+    delta = c.diff()
+    gain  = delta.clip(lower=0).rolling(14, min_periods=1).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14, min_periods=1).mean()
+    f[f"{pfx}_rsi"]   = 100 - 100 / (1 + gain / (loss + 1e-9))
+    f[f"{pfx}_rsi_ob"]= (f[f"{pfx}_rsi"] > 70).astype(int)
+    f[f"{pfx}_rsi_os"]= (f[f"{pfx}_rsi"] < 30).astype(int)
+
+    ma20  = c.rolling(20, min_periods=1).mean()
+    std20 = c.rolling(20, min_periods=1).std().fillna(0)
+    bb_up = ma20 + 2*std20; bb_lo = ma20 - 2*std20
+    f[f"{pfx}_bb_pos"]    = (c - bb_lo) / (bb_up - bb_lo + 1e-9)
+    f[f"{pfx}_bb_width"]  = (bb_up - bb_lo) / (ma20 + 1e-9)
+    f[f"{pfx}_bb_squeeze"]= (f[f"{pfx}_bb_width"] < f[f"{pfx}_bb_width"].rolling(20,min_periods=1).mean()*0.8).astype(int)
+
+    ema9  = c.ewm(span=9,  adjust=False).mean()
+    ema21 = c.ewm(span=21, adjust=False).mean()
+    f[f"{pfx}_ema_cross"] = (ema9 - ema21) / (c + 1e-9)
+    f[f"{pfx}_ema_sign"]  = np.sign(f[f"{pfx}_ema_cross"])
+    f[f"{pfx}_ema_accel"] = f[f"{pfx}_ema_cross"].diff()
+
+    vol_ma = v.rolling(20, min_periods=1).mean()
+    f[f"{pfx}_rel_vol"]   = v / (vol_ma + 1e-9)
+    f[f"{pfx}_vol_spike"] = (f[f"{pfx}_rel_vol"] > 2.5).astype(int)
+
+    f[f"{pfx}_spread"]    = (h - l) / (c + 1e-9)
+    f[f"{pfx}_imbalance"] = ((c-o)/(h-l+1e-9)).rolling(5,min_periods=1).mean()
+
+    body = (c-o).abs(); rng = h-l+1e-9
+    f[f"{pfx}_body_ratio"] = body/rng
+    f[f"{pfx}_upper_wick"] = (h - pd.concat([c,o],axis=1).max(axis=1))/rng
+    f[f"{pfx}_lower_wick"] = (pd.concat([c,o],axis=1).min(axis=1) - l)/rng
+    f[f"{pfx}_is_bull"]    = (c > o).astype(int)
+    f[f"{pfx}_volatility"] = c.pct_change().rolling(10,min_periods=1).std()
+    return f
+
+
+def align_to_1m(df_1m, df_htf, cols):
+    shifted = df_htf[cols].shift(1)
+    return shifted.reindex(df_1m.index, method="ffill")
+
+
+def build_feature_matrix(df_1m: pd.DataFrame) -> pd.DataFrame:
+    ind_1m  = add_indicators(df_1m,                         "m1")
+    ind_5m  = add_indicators(resample_ohlcv(df_1m,"5min"),  "m5")
+    ind_15m = add_indicators(resample_ohlcv(df_1m,"15min"), "m15")
+    ind_30m = add_indicators(resample_ohlcv(df_1m,"30min"), "m30")
+
+    master = ind_1m.copy()
+    for ind, pfx in [(ind_5m,"m5"),(ind_15m,"m15"),(ind_30m,"m30")]:
+        cols = [c for c in ind.columns if c.startswith(pfx)]
+        master = pd.concat([master, align_to_1m(df_1m, ind, cols)], axis=1)
+
+    master["time_mins"]     = np.maximum(master.index.hour*60+master.index.minute-570,0)
+    master["time_sin"]      = np.sin(2*np.pi*master["time_mins"]/390)
+    master["time_cos"]      = np.cos(2*np.pi*master["time_mins"]/390)
+    master["is_first_30m"]  = (master["time_mins"] < 30).astype(int)
+    master["is_power_hour"] = (master["time_mins"] > 330).astype(int)
+    master.dropna(inplace=True)
+    return master
+
+
+def label_bars(df, horizon=10, bt=0.006, ct=-0.006):
+    c = df["close"]
+    fh = c.shift(-1).rolling(horizon).max().shift(-(horizon-1))
+    fl = c.shift(-1).rolling(horizon).min().shift(-(horizon-1))
+    fm = (fh-c)/c; fn = (fl-c)/c
+    lb = pd.Series(1, index=df.index)
+    lb[fm > bt] = 2; lb[fn < ct] = 0
+    both = (fm>bt)&(fn<ct)
+    lb[both&(fm.abs()>=fn.abs())] = 2
+    lb[both&(fm.abs()< fn.abs())] = 0
+    return lb
+
+
+def get_feat_cols(master):
+    exclude = {"open","high","low","close","volume","label"}
+    return [c for c in master.columns if c not in exclude]
+
+
+@st.cache_resource(show_spinner=False)
+def train_model(X_hash, _X, _y):
+    X, y = _X, _y
+    if len(X) < 50:
+        return None
+    X_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.2, shuffle=False)
+    classes = np.unique(y_tr)
+    if len(classes) < 2:
+        return None
+    weights = compute_class_weight("balanced", classes=classes, y=y_tr)
+    sw = y_tr.map(dict(zip(classes.tolist(), weights.tolist()))).values
+
+    model = CatBoostClassifier(
+        depth=6, learning_rate=0.03, iterations=500,
+        loss_function="MultiClass", eval_metric="Accuracy",
+        classes_count=3, l2_leaf_reg=5, min_data_in_leaf=10,
+        random_strength=1.5, bagging_temperature=0.8,
+        early_stopping_rounds=40, random_seed=42,
+        verbose=0, thread_count=-1,
+    )
+    model.fit(Pool(X_tr, y_tr, weight=sw),
+              eval_set=Pool(X_val, y_val), use_best_model=True)
+    return model
+
+
+# ─────────────────────────────────────────────
+# CHARTS
+# ─────────────────────────────────────────────
+
+DARK_BG   = "#0a0e1a"
+GRID_CLR  = "#1e293b"
+TEXT_CLR  = "#94a3b8"
+UP_CLR    = "#22c55e"
+DN_CLR    = "#ef4444"
+VOL_CLR   = "#3b82f6"
+
+def make_price_volume_chart(df_1m: pd.DataFrame,
+                             title: str = "CBRS — 1m Price & Volume") -> go.Figure:
+    # Filter regular session only
+    reg = df_1m[
+        (df_1m.index.time >= pd.Timestamp("09:30").time()) &
+        (df_1m.index.time <= pd.Timestamp("16:00").time())
+    ].copy()
+
+    if reg.empty:
+        reg = df_1m.copy()
+
+    colors = [UP_CLR if r >= 0 else DN_CLR
+              for r in reg["close"].pct_change().fillna(0)]
+
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        row_heights=[0.55, 0.25, 0.20],
+        vertical_spacing=0.02,
+        subplot_titles=("", "", ""),
+    )
+
+    # ── Candlestick ──
+    fig.add_trace(go.Candlestick(
+        x=reg.index, open=reg["open"], high=reg["high"],
+        low=reg["low"], close=reg["close"],
+        increasing_line_color=UP_CLR, decreasing_line_color=DN_CLR,
+        increasing_fillcolor=UP_CLR, decreasing_fillcolor=DN_CLR,
+        name="Price", line_width=1,
+    ), row=1, col=1)
+
+    # ── VWAP ──
+    tp   = (reg["high"] + reg["low"] + reg["close"]) / 3
+    dk   = reg.index.normalize()
+    vwap = (tp * reg["volume"]).groupby(dk).cumsum() / (reg["volume"].groupby(dk).cumsum() + 1e-9)
+    fig.add_trace(go.Scatter(
+        x=reg.index, y=vwap, name="VWAP",
+        line=dict(color="#f59e0b", width=1.5, dash="dot"),
+    ), row=1, col=1)
+
+    # ── EMA 9 / 21 ──
+    ema9  = reg["close"].ewm(span=9,  adjust=False).mean()
+    ema21 = reg["close"].ewm(span=21, adjust=False).mean()
+    fig.add_trace(go.Scatter(x=reg.index, y=ema9,  name="EMA9",
+        line=dict(color="#818cf8", width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=reg.index, y=ema21, name="EMA21",
+        line=dict(color="#c084fc", width=1)), row=1, col=1)
+
+    # ── RSI ──
+    delta = reg["close"].diff()
+    gain  = delta.clip(lower=0).rolling(14, min_periods=1).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14, min_periods=1).mean()
+    rsi   = 100 - 100 / (1 + gain / (loss + 1e-9))
+    fig.add_trace(go.Scatter(x=reg.index, y=rsi, name="RSI",
+        line=dict(color="#06b6d4", width=1.5)), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="#ef4444",
+                  line_width=0.8, row=2, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="#22c55e",
+                  line_width=0.8, row=2, col=1)
+
+    # ── Volume ──
+    fig.add_trace(go.Bar(
+        x=reg.index, y=reg["volume"], name="Volume",
+        marker_color=colors, opacity=0.75,
+    ), row=3, col=1)
+
+    # ── 30-min volume profile lines ──
+    vol_30m = reg["volume"].resample("30min").sum()
+    vol_30m_aligned = vol_30m.reindex(reg.index, method="ffill")
+    fig.add_trace(go.Scatter(
+        x=reg.index, y=vol_30m_aligned,
+        name="Vol 30m avg", fill="tozeroy",
+        fillcolor="rgba(59,130,246,0.08)",
+        line=dict(color=VOL_CLR, width=1, dash="dot"),
+    ), row=3, col=1)
+
+    # ── Layout ──
+    fig.update_layout(
+        title=dict(text=title, font=dict(family="Space Mono", size=14, color="#e2e8f0")),
+        paper_bgcolor=DARK_BG,
+        plot_bgcolor=DARK_BG,
+        font=dict(family="DM Sans", color=TEXT_CLR),
+        xaxis_rangeslider_visible=False,
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+        margin=dict(l=60, r=20, t=50, b=20),
+        height=680,
+    )
+    for i in range(1, 4):
+        fig.update_xaxes(
+            gridcolor=GRID_CLR, zeroline=False,
+            showspikes=True, spikecolor="#475569",
+            spikethickness=1, row=i, col=1,
+        )
+        fig.update_yaxes(
+            gridcolor=GRID_CLR, zeroline=False, row=i, col=1,
+        )
+    fig.update_yaxes(title_text="Price",  row=1, col=1, title_font_size=11)
+    fig.update_yaxes(title_text="RSI",    row=2, col=1, title_font_size=11,
+                     range=[0,100])
+    fig.update_yaxes(title_text="Volume", row=3, col=1, title_font_size=11)
+    return fig
+
+
+def make_volume_profile_chart(df_1m: pd.DataFrame) -> go.Figure:
+    reg = df_1m[
+        (df_1m.index.time >= pd.Timestamp("09:30").time()) &
+        (df_1m.index.time <= pd.Timestamp("16:00").time())
+    ].copy()
+    # Error, no index
+    # reg["interval_30m"] = ((reg.index.hour*60 + reg.index.minute - 570)//30).clip(0, 12)
+    intervals = (reg.index.hour * 60 + reg.index.minute - 570) // 30
+    reg["interval_30m"] = np.clip(intervals, 0, 12)
+
+    LABELS = {
+        0:"09:30",1:"10:00",2:"10:30",3:"11:00",4:"11:30",5:"12:00",
+        6:"12:30",7:"13:00",8:"13:30",9:"14:00",10:"14:30",11:"15:00",12:"15:30"
+    }
+    dates = sorted(reg.index.normalize().unique())
+
+    fig = go.Figure()
+    palette = ["#3b82f6", "#22c55e", "#f59e0b", "#c084fc"]
+
+    for idx, d in enumerate(dates):
+        day_df  = reg[reg.index.normalize() == d]
+        grp     = day_df.groupby("interval_30m")["volume"].sum().reset_index()
+        total   = grp["volume"].sum()
+        grp["pct"] = grp["volume"] / (total + 1e-9) * 100
+        grp["label"] = grp["interval_30m"].map(LABELS)
+
+        fig.add_trace(go.Bar(
+            x=grp["label"], y=grp["volume"],
+            name=str(d.date()),
+            marker_color=palette[idx % len(palette)],
+            opacity=0.85,
+            text=grp["pct"].map("{:.1f}%".format),
+            textposition="outside",
+            textfont=dict(size=10, color=TEXT_CLR),
+        ))
+
+    fig.update_layout(
+        title=dict(text="Volume by 30-min Interval",
+                   font=dict(family="Space Mono", size=13, color="#e2e8f0")),
+        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
+        font=dict(family="DM Sans", color=TEXT_CLR),
+        barmode="group",
+        xaxis=dict(gridcolor=GRID_CLR, title="Time (ET)"),
+        yaxis=dict(gridcolor=GRID_CLR, title="Volume"),
+        legend=dict(bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=60, r=20, t=50, b=40),
+        height=380,
+    )
+    return fig
+
+
+def make_probability_gauge(proba: dict) -> go.Figure:
+    labels = ["Crash", "Squeeze", "Breakout"]
+    values = [proba["crash"], proba["squeeze"], proba["breakout"]]
+    colors = [DN_CLR, "#f59e0b", UP_CLR]
+
+    fig = go.Figure(go.Bar(
+        x=values, y=labels, orientation="h",
+        marker_color=colors, opacity=0.9,
+        text=[f"{v:.1%}" for v in values],
+        textposition="outside",
+        textfont=dict(size=13, family="Space Mono", color="#e2e8f0"),
+    ))
+    fig.update_layout(
+        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
+        font=dict(family="DM Sans", color=TEXT_CLR),
+        xaxis=dict(range=[0,1], gridcolor=GRID_CLR,
+                   tickformat=".0%", tickfont=dict(size=11)),
+        yaxis=dict(gridcolor=GRID_CLR, tickfont=dict(size=12)),
+        margin=dict(l=20, r=80, t=20, b=20),
+        height=200,
+        showlegend=False,
+    )
+    return fig
+
+
+# ─────────────────────────────────────────────
+# PROPHET ENGINE
+# ─────────────────────────────────────────────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def run_prophet(
+    _df_1m: pd.DataFrame,
+    periods: int = 60,
+    interval_width: float = 0.80,
+) -> dict | None:
+    """
+    Fit Prophet on 1m close prices (regular session only).
+    Returns forecast DataFrame + component dict.
+
+    Prophet treats each bar as equally spaced — intraday gaps
+    (overnight, weekend) are handled via make_future_dataframe
+    with freq='T' (minutes), which is fine for within-day forecasts.
+    """
+    if not PROPHET_AVAILABLE:
+        return None
+
+    reg = _df_1m[
+        (_df_1m.index.time >= pd.Timestamp("09:30").time()) &
+        (_df_1m.index.time <= pd.Timestamp("16:00").time())
+    ].copy()
+
+    if len(reg) < 60:
+        return None
+
+    # Prophet requires tz-naive ds column
+    prophet_df = pd.DataFrame({
+        "ds": reg.index.tz_localize(None),
+        "y" : reg["close"].values,
+    }).dropna()
+
+    # Add volume as regressor (normalised)
+    vol_norm = reg["volume"].values / (reg["volume"].mean() + 1e-9)
+    prophet_df["volume_norm"] = vol_norm
+
+    m = Prophet(
+        changepoint_prior_scale  = 0.3,    # flexibility of trend changes
+        seasonality_prior_scale  = 0.1,
+        interval_width           = interval_width,
+        daily_seasonality        = False,
+        weekly_seasonality       = False,
+        yearly_seasonality       = False,
+    )
+    # Intraday "hourly" seasonality — period=390min (6.5h trading day)
+    m.add_seasonality(
+        name   = "intraday",
+        period = 390 / (60 * 24),   # in days
+        fourier_order = 8,
+    )
+    m.add_regressor("volume_norm", standardize=True)
+
+    import logging
+    logging.getLogger("prophet").setLevel(logging.ERROR)
+    logging.getLogger("cmdstanpy").setLevel(logging.ERROR)
+
+    m.fit(prophet_df)
+
+    # Future dataframe: extend by `periods` minutes
+    last_ts   = prophet_df["ds"].iloc[-1]
+    future_ts = pd.date_range(
+        start  = last_ts + pd.Timedelta(minutes=1),
+        periods= periods,
+        freq   = "1min",
+    )
+    future = m.make_future_dataframe(periods=periods, freq="1min")
+    # Fill volume_norm for future rows with recent mean
+    future["volume_norm"] = vol_norm[-20:].mean()
+
+    forecast = m.predict(future)
+
+    # Separate historical fit vs future forecast
+    hist_len = len(prophet_df)
+    fc_hist  = forecast.iloc[:hist_len].copy()
+    fc_fut   = forecast.iloc[hist_len:].copy()
+
+    # Map back to ET timestamps for display
+    fc_hist["ds_et"] = pd.to_datetime(fc_hist["ds"]).dt.tz_localize(ET)
+    fc_fut["ds_et"]  = pd.to_datetime(fc_fut["ds"]).dt.tz_localize(ET)
+
+    # Prophet signal: last actual vs predicted next bar
+    last_actual   = prophet_df["y"].iloc[-1]
+    next_yhat     = fc_fut["yhat"].iloc[0] if len(fc_fut) else last_actual
+    next_yhat_lo  = fc_fut["yhat_lower"].iloc[0] if len(fc_fut) else last_actual
+    next_yhat_hi  = fc_fut["yhat_upper"].iloc[0] if len(fc_fut) else last_actual
+
+    trend_chg = (next_yhat - last_actual) / (last_actual + 1e-9)
+    if   trend_chg >  0.003: prophet_signal = "📈 UP"
+    elif trend_chg < -0.003: prophet_signal = "📉 DOWN"
+    else:                    prophet_signal = "➡️  FLAT"
+
+    return {
+        "fc_hist"       : fc_hist,
+        "fc_fut"        : fc_fut,
+        "actual_df"     : prophet_df,
+        "last_actual"   : last_actual,
+        "next_yhat"     : next_yhat,
+        "next_yhat_lo"  : next_yhat_lo,
+        "next_yhat_hi"  : next_yhat_hi,
+        "trend_chg_pct" : trend_chg * 100,
+        "prophet_signal": prophet_signal,
+        "periods"       : periods,
+    }
+
+
+def make_prophet_chart(result: dict, ticker: str) -> go.Figure:
+    """Plotly chart: actual price + Prophet fitted line + forecast cone."""
+    fc_hist = result["fc_hist"]
+    fc_fut  = result["fc_fut"]
+    actual  = result["actual_df"]
+    periods = result["periods"]
+
+    fig = go.Figure()
+
+    # ── Actual price ──
+    fig.add_trace(go.Scatter(
+        x=pd.to_datetime(actual["ds"]).dt.tz_localize(ET),
+        y=actual["y"],
+        name="Actual Close",
+        line=dict(color="#e2e8f0", width=1.5),
+        opacity=0.9,
+    ))
+
+    # ── Prophet fitted (historical) ──
+    fig.add_trace(go.Scatter(
+        x=fc_hist["ds_et"], y=fc_hist["yhat"],
+        name="Prophet Fit",
+        line=dict(color="#818cf8", width=1.5, dash="dot"),
+    ))
+
+    # ── Historical confidence band ──
+    fig.add_trace(go.Scatter(
+        x=pd.concat([fc_hist["ds_et"], fc_hist["ds_et"].iloc[::-1]]),
+        y=pd.concat([fc_hist["yhat_upper"], fc_hist["yhat_lower"].iloc[::-1]]),
+        fill="toself",
+        fillcolor="rgba(129,140,248,0.08)",
+        line=dict(color="rgba(0,0,0,0)"),
+        name="Fit Band",
+        showlegend=False,
+    ))
+
+    if len(fc_fut) > 0:
+        # ── Forecast line ──
+        # Connect last actual point to forecast
+        connect_x = [fc_hist["ds_et"].iloc[-1], fc_fut["ds_et"].iloc[0]]
+        connect_y = [fc_hist["yhat"].iloc[-1],  fc_fut["yhat"].iloc[0]]
+        fig.add_trace(go.Scatter(
+            x=connect_x, y=connect_y,
+            line=dict(color="#22d3ee", width=2),
+            showlegend=False,
+        ))
+        fig.add_trace(go.Scatter(
+            x=fc_fut["ds_et"], y=fc_fut["yhat"],
+            name=f"Forecast (+{periods}m)",
+            line=dict(color="#22d3ee", width=2.5),
+            mode="lines",
+        ))
+
+        # ── Forecast cone ──
+        fig.add_trace(go.Scatter(
+            x=pd.concat([fc_fut["ds_et"], fc_fut["ds_et"].iloc[::-1]]),
+            y=pd.concat([fc_fut["yhat_upper"], fc_fut["yhat_lower"].iloc[::-1]]),
+            fill="toself",
+            fillcolor="rgba(34,211,238,0.10)",
+            line=dict(color="rgba(0,0,0,0)"),
+            name=f"{int(result.get('interval_width',0.8)*100)}% CI",
+        ))
+
+        # ── Next-bar target marker ──
+        fig.add_trace(go.Scatter(
+            x=[fc_fut["ds_et"].iloc[0]],
+            y=[result["next_yhat"]],
+            mode="markers+text",
+            marker=dict(size=10, color="#22d3ee",
+                        line=dict(color="#0a0e1a", width=2)),
+            text=[f"  ${result['next_yhat']:.2f}"],
+            textfont=dict(color="#22d3ee", size=12,
+                          family="Space Mono"),
+            textposition="middle right",
+            name="Next bar target",
+        ))
+
+        # ── Vertical separator: now vs forecast ──
+        fig.add_vline(
+            x=fc_fut["ds_et"].iloc[0].timestamp() * 1000,
+            line_dash="dash", line_color="#475569", line_width=1,
+            annotation_text=" Forecast →",
+            annotation_font_color="#64748b",
+            annotation_font_size=11,
+        )
+
+    fig.update_layout(
+        title=dict(
+            text=f"{ticker} — Prophet Forecast  (intraday seasonality + volume regressor)",
+            font=dict(family="Space Mono", size=13, color="#e2e8f0"),
+        ),
+        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
+        font=dict(family="DM Sans", color=TEXT_CLR),
+        xaxis=dict(gridcolor=GRID_CLR, zeroline=False,
+                   showspikes=True, spikecolor="#475569"),
+        yaxis=dict(gridcolor=GRID_CLR, zeroline=False, title="Price (USD)"),
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+        margin=dict(l=60, r=20, t=55, b=30),
+        height=480,
+        hovermode="x unified",
+    )
+    return fig
+
+
+def make_prophet_components_chart(result: dict) -> go.Figure:
+    """Show Prophet trend + intraday seasonality components."""
+    fc_hist = result["fc_hist"]
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        subplot_titles=["Trend Component", "Intraday Seasonality"],
+        vertical_spacing=0.12,
+    )
+
+    fig.add_trace(go.Scatter(
+        x=fc_hist["ds_et"], y=fc_hist["trend"],
+        name="Trend", line=dict(color="#f59e0b", width=1.5),
+    ), row=1, col=1)
+
+    if "additive_terms" in fc_hist.columns:
+        fig.add_trace(go.Scatter(
+            x=fc_hist["ds_et"], y=fc_hist["additive_terms"],
+            name="Seasonality", line=dict(color="#c084fc", width=1.5),
+            fill="tozeroy", fillcolor="rgba(192,132,252,0.10)",
+        ), row=2, col=1)
+
+    fig.update_layout(
+        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
+        font=dict(family="DM Sans", color=TEXT_CLR),
+        xaxis2=dict(gridcolor=GRID_CLR),
+        yaxis=dict(gridcolor=GRID_CLR, title="Price"),
+        yaxis2=dict(gridcolor=GRID_CLR, title="Effect"),
+        legend=dict(bgcolor="rgba(0,0,0,0)"),
+        margin=dict(l=60, r=20, t=40, b=20),
+        height=380,
+    )
+    for i in range(1, 3):
+        fig.update_xaxes(gridcolor=GRID_CLR, row=i, col=1)
+        fig.update_yaxes(gridcolor=GRID_CLR, row=i, col=1)
+    return fig
+
+
+# ─────────────────────────────────────────────
+# SIDEBAR
+# ─────────────────────────────────────────────
+
+with st.sidebar:
+    st.markdown("## ⚙️ Settings")
+    st.markdown("---")
+
+    ticker = st.text_input("Ticker", value="CBRS").upper().strip()
+
+    today      = date.today()
+    ipo_date   = date(2026, 5, 14)
+    start_date = st.date_input(
+        "Start Date",
+        value=ipo_date,
+        min_value=ipo_date,
+        max_value=today,
+        help="yfinance 1m data: max 7 days back",
+    )
+    end_date = st.date_input(
+        "End Date",
+        value=today,
+        min_value=start_date,
+        max_value=today + timedelta(days=1),
+    )
+
+    st.markdown("---")
+    st.markdown("**Model Parameters**")
+    horizon   = st.slider("Label Horizon (bars)", 5, 30, 10)
+    bt_thresh = st.slider("Breakout Threshold %", 0.2, 2.0, 0.6, step=0.1) / 100
+    ct_thresh = st.slider("Crash Threshold %",   -2.0, -0.2, -0.6, step=0.1) / 100
+    conf_thr  = st.slider("Confidence Gate %",   30, 70, 45) / 100
+
+    st.markdown("---")
+    st.markdown("**Prophet Settings**")
+    use_prophet     = st.toggle("Enable Prophet Forecast", value=True,
+                                disabled=not PROPHET_AVAILABLE,
+                                help="Requires `pip install prophet`")
+    prophet_periods = st.slider("Forecast Horizon (bars)", 10, 120, 60,
+                                disabled=not use_prophet)
+    prophet_ci      = st.slider("Confidence Interval %", 50, 95, 80,
+                                disabled=not use_prophet) / 100
+
+    if not PROPHET_AVAILABLE:
+        st.caption("⚠️ `prophet` not installed — run `pip install prophet`")
+
+    st.markdown("---")
+    run_btn = st.button("🚀 Run Analysis", use_container_width=True, type="primary")
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
+
+st.markdown("# 🧠 CBRS Multi-Timeframe Predictor")
+st.markdown(
+    "<span style='font-family:Space Mono;font-size:13px;color:#64748b'>"
+    "CatBoost · Prophet · 1m / 5m / 15m / 30m · Breakout / Squeeze / Crash</span>",
+    unsafe_allow_html=True,
+)
+
+# ── Feature Summary Panel (always visible) ──
+st.markdown("""
+<style>
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin: 18px 0 8px 0;
+}
+.summary-block {
+    background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
+    border: 1px solid #1e293b;
+    border-radius: 10px;
+    padding: 14px 16px;
+}
+.summary-block-title {
+    font-family: 'Space Mono', monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #22d3ee;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.summary-block-title .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: #22d3ee;
+    display: inline-block;
+}
+.summary-item {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 12.5px;
+    color: #94a3b8;
+    padding: 3px 0;
+    border-bottom: 1px solid #1e293b;
+    display: flex;
+    justify-content: space-between;
+}
+.summary-item:last-child { border-bottom: none; }
+.summary-item b { color: #e2e8f0; font-weight: 500; }
+.summary-note {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 11.5px;
+    color: #475569;
+    margin-top: 14px;
+    padding: 10px 14px;
+    background: #0f172a;
+    border-left: 3px solid #334155;
+    border-radius: 0 6px 6px 0;
+}
+</style>
+
+<div class="summary-grid">
+
+  <div class="summary-block">
+    <div class="summary-block-title"><span class="dot"></span> 📥 Input Data</div>
+    <div class="summary-item"><span>Timeframe</span><b>1-minute OHLCV</b></div>
+    <div class="summary-item"><span>Pre-market</span><b>Volume included</b></div>
+    <div class="summary-item"><span>Session</span><b>09:30–16:00 ET</b></div>
+    <div class="summary-item"><span>Source</span><b>yfinance (≤7 days)</b></div>
+    <div class="summary-item"><span>Date select</span><b>Sidebar — any range</b></div>
+  </div>
+
+  <div class="summary-block">
+    <div class="summary-block-title"><span class="dot" style="background:#818cf8"></span> ⚙️ Multi-Scale Features</div>
+    <div class="summary-item"><span>1m</span><b>VWAP · Spread · Imbalance · Candle</b></div>
+    <div class="summary-item"><span>5m</span><b>ATR · RSI · Vol Spike · EMA Cross</b></div>
+    <div class="summary-item"><span>15m</span><b>BB Squeeze · VWAP Dist · Momentum</b></div>
+    <div class="summary-item"><span>30m</span><b>EMA Accel · Vol Trend · Regime</b></div>
+    <div class="summary-item"><span>Time</span><b>sin/cos · First30m · Power Hour</b></div>
+  </div>
+
+  <div class="summary-block">
+    <div class="summary-block-title"><span class="dot" style="background:#22c55e"></span> 🎯 CatBoost Model</div>
+    <div class="summary-item"><span>Algorithm</span><b>CatBoostClassifier</b></div>
+    <div class="summary-item"><span>Loss</span><b>MultiClass (Logloss)</b></div>
+    <div class="summary-item"><span>Output</span><b>Breakout / Squeeze / Crash %</b></div>
+    <div class="summary-item"><span>Label</span><b>Forward ±0.6% over N bars</b></div>
+    <div class="summary-item"><span>Guard</span><b>Confidence gate (default 45%)</b></div>
+  </div>
+
+  <div class="summary-block">
+    <div class="summary-block-title"><span class="dot" style="background:#f59e0b"></span> 📊 Charts</div>
+    <div class="summary-item"><span>Price chart</span><b>Candlestick + VWAP + EMA9/21</b></div>
+    <div class="summary-item"><span>Oscillator</span><b>RSI(14) with OB/OS lines</b></div>
+    <div class="summary-item"><span>Volume</span><b>1m bar + 30m rolling profile</b></div>
+    <div class="summary-item"><span>Vol profile</span><b>30-min interval % breakdown</b></div>
+    <div class="summary-item"><span>Filter</span><b>Select date or view All</b></div>
+  </div>
+
+  <div class="summary-block">
+    <div class="summary-block-title"><span class="dot" style="background:#c084fc"></span> 🔮 Prophet Forecast</div>
+    <div class="summary-item"><span>Model</span><b>Facebook Prophet</b></div>
+    <div class="summary-item"><span>Seasonality</span><b>Intraday (390-min cycle)</b></div>
+    <div class="summary-item"><span>Regressor</span><b>Normalised volume</b></div>
+    <div class="summary-item"><span>Output</span><b>Price cone + CI band</b></div>
+    <div class="summary-item"><span>Signal</span><b>UP / DOWN / FLAT direction</b></div>
+  </div>
+
+  <div class="summary-block">
+    <div class="summary-block-title"><span class="dot" style="background:#ef4444"></span> 🤝 Model Agreement</div>
+    <div class="summary-item"><span>✅ Agree</span><b>Signal strengthened</b></div>
+    <div class="summary-item"><span>⚠️ Disagree</span><b>Exercise caution</b></div>
+    <div class="summary-item"><span>⚪ Uncertain</span><b>Defer to Prophet</b></div>
+    <div class="summary-item"><span>Feature imp.</span><b>Top-20 bar chart</b></div>
+    <div class="summary-item"><span>Components</span><b>Trend + seasonality</b></div>
+  </div>
+
+</div>
+
+<div class="summary-note">
+  ⚠️ &nbsp;For <b>research reference only</b> — not financial advice.
+  With only 2 trading days of data, model confidence is inherently limited.
+  Use signals as one input among many, not as standalone trade triggers.
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("---")
+
+if not run_btn:
+    st.info("👈 Configure settings in the sidebar and click **Run Analysis**.")
+    st.stop()
+
+# ── Fetch ──
+start_str = start_date.strftime("%Y-%m-%d")
+end_str   = (end_date + timedelta(days=1)).strftime("%Y-%m-%d")
+
+with st.spinner(f"Fetching {ticker} 1m data …"):
+    df_1m = fetch_1m(ticker, start_str, end_str)
+
+if df_1m.empty:
+    st.error(f"❌ No data found for **{ticker}**. Try a different ticker or date range.")
+    st.stop()
+
+dates_found = sorted(set(df_1m.index.date))
+st.success(f"✅ Loaded **{len(df_1m):,}** bars  |  Dates: {[str(d) for d in dates_found]}")
+
+# ── Date filter for display ──
+col_a, col_b = st.columns([3, 1])
+with col_a:
+    if len(dates_found) > 1:
+        selected_date = st.selectbox(
+            "📅 Chart Date",
+            options=["All"] + [str(d) for d in dates_found],
+            index=0,
+        )
+    else:
+        selected_date = str(dates_found[0])
+
+if selected_date == "All":
+    df_plot = df_1m
+else:
+    df_plot = df_1m[df_1m.index.date == date.fromisoformat(selected_date)]
+
+# ── Price + Volume Chart ──
+st.plotly_chart(
+    make_price_volume_chart(df_plot, f"{ticker} — {selected_date}  (1m)"),
+    use_container_width=True,
+)
+
+# ── Volume Profile ──
+st.plotly_chart(
+    make_volume_profile_chart(df_1m),
+    use_container_width=True,
+)
+
+st.markdown("---")
+
+# ── Model ──
+with st.spinner("Building multi-timeframe features …"):
+    master = build_feature_matrix(df_1m)
+
+with st.spinner("Training CatBoostClassifier …"):
+    master["label"] = label_bars(master, horizon=horizon,
+                                  bt=bt_thresh, ct=ct_thresh)
+    labeled   = master.dropna(subset=["label"])
+    feat_cols = get_feat_cols(labeled)
+    X = labeled[feat_cols]
+    y = labeled["label"].astype(int)
+
+    lbl_counts = y.value_counts()
+    c0 = int(lbl_counts.get(0, 0))
+    c1 = int(lbl_counts.get(1, 0))
+    c2 = int(lbl_counts.get(2, 0))
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("🔴 Crash bars",   c0)
+    col2.metric("🟡 Squeeze bars", c1)
+    col3.metric("🟢 Breakout bars",c2)
+
+    if len(X) < 50 or len(y.unique()) < 2:
+        st.warning("⚠️ Insufficient data to train model. "
+                   "Try extending the date range.")
+        st.stop()
+
+    model = train_model(
+        hash(str(X.values.tobytes()[:512])), X, y
+    )
+
+if model is None:
+    st.error("Model training failed.")
+    st.stop()
+
+# ── Prediction ──
+st.markdown("## 🎯 Latest Bar Prediction")
+
+last_feat = master[feat_cols].iloc[[-1]]
+proba     = model.predict_proba(last_feat)[0]
+max_p     = proba.max()
+trend_idx = int(np.argmax(proba))
+trend_map = {0:"CRASH", 1:"SQUEEZE", 2:"BREAKOUT"}
+color_map = {0:"trend-crash", 1:"trend-squeeze", 2:"trend-breakout"}
+trend     = trend_map[trend_idx] if max_p >= conf_thr else "UNCERTAIN"
+tclass    = color_map[trend_idx] if max_p >= conf_thr else "trend-uncertain"
+valid     = max_p >= conf_thr
+
+proba_dict = {"crash": proba[0], "squeeze": proba[1], "breakout": proba[2]}
+
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.markdown(f"""<div class="metric-card">
+  <div class="metric-label">Last Close</div>
+  <div class="metric-value" style="color:#e2e8f0">${master['close'].iloc[-1]:.2f}</div>
+</div>""", unsafe_allow_html=True)
+
+c2.markdown(f"""<div class="metric-card">
+  <div class="metric-label">Breakout</div>
+  <div class="metric-value trend-breakout">{proba[2]:.1%}</div>
+</div>""", unsafe_allow_html=True)
+
+c3.markdown(f"""<div class="metric-card">
+  <div class="metric-label">Squeeze</div>
+  <div class="metric-value trend-squeeze">{proba[1]:.1%}</div>
+</div>""", unsafe_allow_html=True)
+
+c4.markdown(f"""<div class="metric-card">
+  <div class="metric-label">Crash</div>
+  <div class="metric-value trend-crash">{proba[0]:.1%}</div>
+</div>""", unsafe_allow_html=True)
+
+c5.markdown(f"""<div class="metric-card">
+  <div class="metric-label">Trend</div>
+  <div class="metric-value {tclass}">{trend}</div>
+  <div style="margin-top:6px">
+    <span class="signal-badge {'badge-valid' if valid else 'badge-invalid'}">
+      {'✓ VALID' if valid else '✗ UNCERTAIN'}
+    </span>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+st.plotly_chart(make_probability_gauge(proba_dict), use_container_width=True)
+
+# ─────────────────────────────────────────────
+# PROPHET SECTION
+# ─────────────────────────────────────────────
+st.markdown("---")
+st.markdown("## 🔮 Prophet Forecast  <span style='font-size:13px;color:#64748b;font-family:DM Sans'>for reference only</span>", unsafe_allow_html=True)
+
+if not PROPHET_AVAILABLE:
+    st.warning("Prophet is not installed. Run `pip install prophet` to enable this section.")
+elif not use_prophet:
+    st.info("Prophet forecast is disabled. Toggle it on in the sidebar.")
+else:
+    with st.spinner("Fitting Prophet model …"):
+        prophet_result = run_prophet(
+            df_1m,
+            periods        = prophet_periods,
+            interval_width = prophet_ci,
+        )
+
+    if prophet_result is None:
+        st.warning("⚠️ Not enough data to fit Prophet (need ≥ 60 regular-session bars).")
+    else:
+        # ── Signal summary cards ──
+        pa, pb, pc, pd_ = st.columns(4)
+        last_p  = prophet_result["last_actual"]
+        next_p  = prophet_result["next_yhat"]
+        chg_pct = prophet_result["trend_chg_pct"]
+        sig     = prophet_result["prophet_signal"]
+        sig_color = "#22c55e" if "UP" in sig else "#ef4444" if "DOWN" in sig else "#f59e0b"
+
+        pa.markdown(f"""<div class="metric-card">
+          <div class="metric-label">Last Close</div>
+          <div class="metric-value" style="color:#e2e8f0">${last_p:.2f}</div>
+        </div>""", unsafe_allow_html=True)
+
+        pb.markdown(f"""<div class="metric-card">
+          <div class="metric-label">Next Bar Target</div>
+          <div class="metric-value" style="color:#22d3ee">${next_p:.2f}</div>
+        </div>""", unsafe_allow_html=True)
+
+        pc.markdown(f"""<div class="metric-card">
+          <div class="metric-label">Expected Δ</div>
+          <div class="metric-value" style="color:{sig_color}">{chg_pct:+.3f}%</div>
+        </div>""", unsafe_allow_html=True)
+
+        pd_.markdown(f"""<div class="metric-card">
+          <div class="metric-label">Prophet Signal</div>
+          <div class="metric-value" style="color:{sig_color};font-size:22px">{sig}</div>
+        </div>""", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── CI range info ──
+        lo = prophet_result["next_yhat_lo"]
+        hi = prophet_result["next_yhat_hi"]
+        st.markdown(
+            f"<div style='font-family:Space Mono;font-size:12px;color:#64748b;"
+            f"text-align:center;padding:6px 0'>"
+            f"{int(prophet_ci*100)}% Confidence Interval for next bar:  "
+            f"<span style='color:#e2e8f0'>${lo:.2f}</span> — "
+            f"<span style='color:#e2e8f0'>${hi:.2f}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # ── Main Prophet chart ──
+        st.plotly_chart(
+            make_prophet_chart(prophet_result, ticker),
+            use_container_width=True,
+        )
+
+        # ── Components chart ──
+        with st.expander("📈 Prophet Components (Trend + Seasonality)", expanded=False):
+            st.plotly_chart(
+                make_prophet_components_chart(prophet_result),
+                use_container_width=True,
+            )
+
+        # ── Agreement with CatBoost ──
+        st.markdown("#### 🤝 Model Agreement")
+        cb_trend  = trend      # from CatBoost section above
+        ph_signal = sig
+
+        agree = (
+            ("BREAKOUT" in cb_trend and "UP"   in ph_signal) or
+            ("CRASH"    in cb_trend and "DOWN" in ph_signal) or
+            ("SQUEEZE"  in cb_trend and "FLAT" in ph_signal)
+        )
+        if "UNCERTAIN" in cb_trend:
+            agree_txt   = "⚪ CatBoost UNCERTAIN — defer to Prophet"
+            agree_color = "#94a3b8"
+        elif agree:
+            agree_txt   = "✅ Both models AGREE — signal strengthened"
+            agree_color = "#22c55e"
+        else:
+            agree_txt   = "⚠️ Models DISAGREE — exercise caution"
+            agree_color = "#f59e0b"
+
+        st.markdown(
+            f"<div style='background:linear-gradient(135deg,#0f172a,#1e293b);"
+            f"border:1px solid {agree_color};border-radius:10px;padding:14px 20px;"
+            f"font-family:Space Mono;font-size:13px;color:{agree_color};text-align:center'>"
+            f"CatBoost: <b>{cb_trend}</b> &nbsp;|&nbsp; Prophet: <b>{ph_signal}</b>"
+            f"<br><span style='font-size:15px;margin-top:6px;display:block'>{agree_txt}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("<br>", unsafe_allow_html=True)
+
+# ── Feature Importance ──
+st.markdown("---")
+st.markdown("## 📊 Top-20 Feature Importance")
+
+fi = pd.Series(model.get_feature_importance(), index=feat_cols).sort_values(ascending=False)
+fi_top = fi.head(20)
+
+fig_fi = go.Figure(go.Bar(
+    x=fi_top.values[::-1],
+    y=fi_top.index[::-1],
+    orientation="h",
+    marker=dict(
+        color=fi_top.values[::-1],
+        colorscale=[[0,"#1e3a5f"],[0.5,"#3b82f6"],[1,"#22d3ee"]],
+        showscale=False,
+    ),
+    text=[f"{v:.2f}" for v in fi_top.values[::-1]],
+    textposition="outside",
+    textfont=dict(size=10, color=TEXT_CLR),
+))
+fig_fi.update_layout(
+    paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
+    font=dict(family="DM Sans", color=TEXT_CLR),
+    xaxis=dict(gridcolor=GRID_CLR, title="Importance Score"),
+    yaxis=dict(gridcolor=GRID_CLR, tickfont=dict(size=11)),
+    margin=dict(l=20, r=80, t=20, b=20),
+    height=500,
+)
+st.plotly_chart(fig_fi, use_container_width=True)
+
+# ── Footer ──
+st.markdown("---")
+st.markdown(
+    "<div style='text-align:center;color:#334155;font-family:Space Mono;"
+    "font-size:11px;padding:12px'>CBRS MTF Predictor · For research only · "
+    "Not financial advice</div>",
+    unsafe_allow_html=True,
+)
