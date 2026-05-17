@@ -40,40 +40,58 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap');
 
 html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif;
-    background-color: #0a0e1a;
-    color: #e2e8f0;
+    font-family: Georgia, 'Times New Roman', serif;
+    background-color: #f8f5f0;
+    color: #2c2c2c;
 }
-h1, h2, h3 { font-family: 'Space Mono', monospace; }
-
+h1, h2, h3, h4 {
+    font-family: Georgia, 'Times New Roman', serif;
+    color: #1a1a2e;
+    font-weight: 700;
+}
+.main .block-container {
+    background-color: #f8f5f0;
+    padding-top: 2rem;
+}
+div[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #fffdf9 0%, #f3ede4 100%);
+    border-right: 1px solid #ddd5c8;
+}
+div[data-testid="stSidebar"] label,
+div[data-testid="stSidebar"] p,
+div[data-testid="stSidebar"] span {
+    font-family: Georgia, serif;
+    color: #3a3028;
+}
 .metric-card {
-    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-    border: 1px solid #334155;
+    background: linear-gradient(135deg, #ffffff 0%, #f5f0e8 100%);
+    border: 1px solid #ddd5c8;
     border-radius: 12px;
     padding: 16px 20px;
     text-align: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
 }
 .metric-label {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 1.5px;
-    color: #64748b;
+    color: #8a7968;
     font-family: 'Space Mono', monospace;
 }
 .metric-value {
-    font-size: 28px;
+    font-size: 26px;
     font-weight: 700;
     font-family: 'Space Mono', monospace;
     margin-top: 4px;
+    color: #1a1a2e;
 }
-.trend-breakout { color: #22c55e; }
-.trend-crash    { color: #ef4444; }
-.trend-squeeze  { color: #f59e0b; }
-.trend-uncertain{ color: #94a3b8; }
-
+.trend-breakout  { color: #1a7a3f; }
+.trend-crash     { color: #c0392b; }
+.trend-squeeze   { color: #b8860b; }
+.trend-uncertain { color: #7a7060; }
 .signal-badge {
     display: inline-block;
     padding: 4px 14px;
@@ -83,12 +101,17 @@ h1, h2, h3 { font-family: 'Space Mono', monospace; }
     font-weight: 700;
     letter-spacing: 1px;
 }
-.badge-valid   { background:#14532d; color:#22c55e; border:1px solid #22c55e; }
-.badge-invalid { background:#1c1917; color:#94a3b8; border:1px solid #475569; }
-
-div[data-testid="stSidebar"] {
-    background: #0f172a;
-    border-right: 1px solid #1e293b;
+.badge-valid   { background:#dcf5e7; color:#1a7a3f; border:1px solid #1a7a3f; }
+.badge-invalid { background:#f0ede8; color:#8a7968; border:1px solid #c8bfb4; }
+hr { border-color: #ddd5c8; }
+div[data-testid="stSelectbox"] label,
+div[data-testid="stSlider"] label,
+div[data-testid="stTextInput"] label,
+div[data-testid="stDateInput"] label,
+div[data-testid="stToggle"] label {
+    font-family: Georgia, serif;
+    color: #3a3028;
+    font-size: 14px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -273,12 +296,12 @@ def train_model(X_hash, _X, _y):
 # CHARTS
 # ─────────────────────────────────────────────
 
-DARK_BG   = "#0a0e1a"
-GRID_CLR  = "#1e293b"
-TEXT_CLR  = "#94a3b8"
-UP_CLR    = "#22c55e"
-DN_CLR    = "#ef4444"
-VOL_CLR   = "#3b82f6"
+DARK_BG   = "#f8f5f0"
+GRID_CLR  = "#e8e2d8"
+TEXT_CLR  = "#4a4035"
+UP_CLR    = "#1a7a3f"
+DN_CLR    = "#c0392b"
+VOL_CLR   = "#3a6ea5"
 
 def make_price_volume_chart(df_1m: pd.DataFrame,
                              title: str = "CBRS — 1m Price & Volume") -> go.Figure:
@@ -317,16 +340,16 @@ def make_price_volume_chart(df_1m: pd.DataFrame,
     vwap = (tp * reg["volume"]).groupby(dk).cumsum() / (reg["volume"].groupby(dk).cumsum() + 1e-9)
     fig.add_trace(go.Scatter(
         x=reg.index, y=vwap, name="VWAP",
-        line=dict(color="#f59e0b", width=1.5, dash="dot"),
+        line=dict(color="#b8860b", width=1.5, dash="dot"),
     ), row=1, col=1)
 
     # ── EMA 9 / 21 ──
     ema9  = reg["close"].ewm(span=9,  adjust=False).mean()
     ema21 = reg["close"].ewm(span=21, adjust=False).mean()
     fig.add_trace(go.Scatter(x=reg.index, y=ema9,  name="EMA9",
-        line=dict(color="#818cf8", width=1)), row=1, col=1)
+        line=dict(color="#3a6ea5", width=1)), row=1, col=1)
     fig.add_trace(go.Scatter(x=reg.index, y=ema21, name="EMA21",
-        line=dict(color="#c084fc", width=1)), row=1, col=1)
+        line=dict(color="#7b4fa6", width=1)), row=1, col=1)
 
     # ── RSI ──
     delta = reg["close"].diff()
@@ -334,16 +357,16 @@ def make_price_volume_chart(df_1m: pd.DataFrame,
     loss  = (-delta.clip(upper=0)).rolling(14, min_periods=1).mean()
     rsi   = 100 - 100 / (1 + gain / (loss + 1e-9))
     fig.add_trace(go.Scatter(x=reg.index, y=rsi, name="RSI",
-        line=dict(color="#06b6d4", width=1.5)), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dot", line_color="#ef4444",
+        line=dict(color="#3a6ea5", width=1.5)), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="#c0392b",
                   line_width=0.8, row=2, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="#22c55e",
+    fig.add_hline(y=30, line_dash="dot", line_color="#1a7a3f",
                   line_width=0.8, row=2, col=1)
 
     # ── Volume ──
     fig.add_trace(go.Bar(
         x=reg.index, y=reg["volume"], name="Volume",
-        marker_color=colors, opacity=0.75,
+        marker_color=colors, opacity=0.70,
     ), row=3, col=1)
 
     # ── 30-min volume profile lines ──
@@ -352,18 +375,20 @@ def make_price_volume_chart(df_1m: pd.DataFrame,
     fig.add_trace(go.Scatter(
         x=reg.index, y=vol_30m_aligned,
         name="Vol 30m avg", fill="tozeroy",
-        fillcolor="rgba(59,130,246,0.08)",
+        fillcolor="rgba(58,110,165,0.08)",
         line=dict(color=VOL_CLR, width=1, dash="dot"),
     ), row=3, col=1)
 
     # ── Layout ──
     fig.update_layout(
-        title=dict(text=title, font=dict(family="Space Mono", size=14, color="#e2e8f0")),
+        title=dict(text=title, font=dict(family="Georgia, serif", size=14, color="#1a1a2e")),
         paper_bgcolor=DARK_BG,
-        plot_bgcolor=DARK_BG,
-        font=dict(family="DM Sans", color=TEXT_CLR),
+        plot_bgcolor="#ffffff",
+        font=dict(family="Georgia, serif", color=TEXT_CLR),
         xaxis_rangeslider_visible=False,
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+        legend=dict(bgcolor="rgba(255,255,255,0.8)",
+                    bordercolor="#ddd5c8", borderwidth=1,
+                    font=dict(size=11)),
         margin=dict(l=60, r=20, t=50, b=20),
         height=680,
     )
@@ -388,11 +413,9 @@ def make_volume_profile_chart(df_1m: pd.DataFrame) -> go.Figure:
         (df_1m.index.time >= pd.Timestamp("09:30").time()) &
         (df_1m.index.time <= pd.Timestamp("16:00").time())
     ].copy()
-    # Error, no index
     # reg["interval_30m"] = ((reg.index.hour*60 + reg.index.minute - 570)//30).clip(0, 12)
     intervals = (reg.index.hour * 60 + reg.index.minute - 570) // 30
     reg["interval_30m"] = np.clip(intervals, 0, 12)
-
     LABELS = {
         0:"09:30",1:"10:00",2:"10:30",3:"11:00",4:"11:30",5:"12:00",
         6:"12:30",7:"13:00",8:"13:30",9:"14:00",10:"14:30",11:"15:00",12:"15:30"
@@ -421,13 +444,14 @@ def make_volume_profile_chart(df_1m: pd.DataFrame) -> go.Figure:
 
     fig.update_layout(
         title=dict(text="Volume by 30-min Interval",
-                   font=dict(family="Space Mono", size=13, color="#e2e8f0")),
-        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
-        font=dict(family="DM Sans", color=TEXT_CLR),
+                   font=dict(family="Georgia, serif", size=13, color="#1a1a2e")),
+        paper_bgcolor=DARK_BG, plot_bgcolor="#ffffff",
+        font=dict(family="Georgia, serif", color=TEXT_CLR),
         barmode="group",
         xaxis=dict(gridcolor=GRID_CLR, title="Time (ET)"),
         yaxis=dict(gridcolor=GRID_CLR, title="Volume"),
-        legend=dict(bgcolor="rgba(0,0,0,0)"),
+        legend=dict(bgcolor="rgba(255,255,255,0.8)",
+                    bordercolor="#ddd5c8", borderwidth=1),
         margin=dict(l=60, r=20, t=50, b=40),
         height=380,
     )
@@ -437,18 +461,18 @@ def make_volume_profile_chart(df_1m: pd.DataFrame) -> go.Figure:
 def make_probability_gauge(proba: dict) -> go.Figure:
     labels = ["Crash", "Squeeze", "Breakout"]
     values = [proba["crash"], proba["squeeze"], proba["breakout"]]
-    colors = [DN_CLR, "#f59e0b", UP_CLR]
+    colors = [DN_CLR, "#b8860b", UP_CLR]
 
     fig = go.Figure(go.Bar(
         x=values, y=labels, orientation="h",
-        marker_color=colors, opacity=0.9,
+        marker_color=colors, opacity=0.85,
         text=[f"{v:.1%}" for v in values],
         textposition="outside",
-        textfont=dict(size=13, family="Space Mono", color="#e2e8f0"),
+        textfont=dict(size=13, family="Space Mono", color="#2c2c2c"),
     ))
     fig.update_layout(
-        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
-        font=dict(family="DM Sans", color=TEXT_CLR),
+        paper_bgcolor=DARK_BG, plot_bgcolor="#ffffff",
+        font=dict(family="Georgia, serif", color=TEXT_CLR),
         xaxis=dict(range=[0,1], gridcolor=GRID_CLR,
                    tickformat=".0%", tickfont=dict(size=11)),
         yaxis=dict(gridcolor=GRID_CLR, tickfont=dict(size=12)),
@@ -581,7 +605,7 @@ def make_prophet_chart(result: dict, ticker: str) -> go.Figure:
         x=pd.to_datetime(actual["ds"]).dt.tz_localize(ET),
         y=actual["y"],
         name="Actual Close",
-        line=dict(color="#e2e8f0", width=1.5),
+        line=dict(color="#2c2c2c", width=1.5),
         opacity=0.9,
     ))
 
@@ -589,7 +613,7 @@ def make_prophet_chart(result: dict, ticker: str) -> go.Figure:
     fig.add_trace(go.Scatter(
         x=fc_hist["ds_et"], y=fc_hist["yhat"],
         name="Prophet Fit",
-        line=dict(color="#818cf8", width=1.5, dash="dot"),
+        line=dict(color="#7b4fa6", width=1.5, dash="dot"),
     ))
 
     # ── Historical confidence band ──
@@ -597,7 +621,7 @@ def make_prophet_chart(result: dict, ticker: str) -> go.Figure:
         x=pd.concat([fc_hist["ds_et"], fc_hist["ds_et"].iloc[::-1]]),
         y=pd.concat([fc_hist["yhat_upper"], fc_hist["yhat_lower"].iloc[::-1]]),
         fill="toself",
-        fillcolor="rgba(129,140,248,0.08)",
+        fillcolor="rgba(123,79,166,0.08)",
         line=dict(color="rgba(0,0,0,0)"),
         name="Fit Band",
         showlegend=False,
@@ -610,13 +634,13 @@ def make_prophet_chart(result: dict, ticker: str) -> go.Figure:
         connect_y = [fc_hist["yhat"].iloc[-1],  fc_fut["yhat"].iloc[0]]
         fig.add_trace(go.Scatter(
             x=connect_x, y=connect_y,
-            line=dict(color="#22d3ee", width=2),
+            line=dict(color="#3a6ea5", width=2),
             showlegend=False,
         ))
         fig.add_trace(go.Scatter(
             x=fc_fut["ds_et"], y=fc_fut["yhat"],
             name=f"Forecast (+{periods}m)",
-            line=dict(color="#22d3ee", width=2.5),
+            line=dict(color="#3a6ea5", width=2.5),
             mode="lines",
         ))
 
@@ -625,7 +649,7 @@ def make_prophet_chart(result: dict, ticker: str) -> go.Figure:
             x=pd.concat([fc_fut["ds_et"], fc_fut["ds_et"].iloc[::-1]]),
             y=pd.concat([fc_fut["yhat_upper"], fc_fut["yhat_lower"].iloc[::-1]]),
             fill="toself",
-            fillcolor="rgba(34,211,238,0.10)",
+            fillcolor="rgba(58,110,165,0.10)",
             line=dict(color="rgba(0,0,0,0)"),
             name=f"{int(result.get('interval_width',0.8)*100)}% CI",
         ))
@@ -635,35 +659,36 @@ def make_prophet_chart(result: dict, ticker: str) -> go.Figure:
             x=[fc_fut["ds_et"].iloc[0]],
             y=[result["next_yhat"]],
             mode="markers+text",
-            marker=dict(size=10, color="#22d3ee",
-                        line=dict(color="#0a0e1a", width=2)),
+            marker=dict(size=10, color="#3a6ea5",
+                        line=dict(color="#f8f5f0", width=2)),
             text=[f"  ${result['next_yhat']:.2f}"],
-            textfont=dict(color="#22d3ee", size=12,
-                          family="Space Mono"),
+            textfont=dict(color="#3a6ea5", size=12, family="Space Mono"),
             textposition="middle right",
             name="Next bar target",
         ))
 
-        # ── Vertical separator: now vs forecast ──
+        # ── Vertical separator ──
         fig.add_vline(
             x=fc_fut["ds_et"].iloc[0].timestamp() * 1000,
-            line_dash="dash", line_color="#475569", line_width=1,
+            line_dash="dash", line_color="#a09080", line_width=1,
             annotation_text=" Forecast →",
-            annotation_font_color="#64748b",
+            annotation_font_color="#8a7968",
             annotation_font_size=11,
         )
 
     fig.update_layout(
         title=dict(
             text=f"{ticker} — Prophet Forecast  (intraday seasonality + volume regressor)",
-            font=dict(family="Space Mono", size=13, color="#e2e8f0"),
+            font=dict(family="Georgia, serif", size=13, color="#1a1a2e"),
         ),
-        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
-        font=dict(family="DM Sans", color=TEXT_CLR),
+        paper_bgcolor=DARK_BG, plot_bgcolor="#ffffff",
+        font=dict(family="Georgia, serif", color=TEXT_CLR),
         xaxis=dict(gridcolor=GRID_CLR, zeroline=False,
-                   showspikes=True, spikecolor="#475569"),
+                   showspikes=True, spikecolor="#a09080"),
         yaxis=dict(gridcolor=GRID_CLR, zeroline=False, title="Price (USD)"),
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+        legend=dict(bgcolor="rgba(255,255,255,0.85)",
+                    bordercolor="#ddd5c8", borderwidth=1,
+                    font=dict(size=11)),
         margin=dict(l=60, r=20, t=55, b=30),
         height=480,
         hovermode="x unified",
@@ -684,23 +709,24 @@ def make_prophet_components_chart(result: dict) -> go.Figure:
 
     fig.add_trace(go.Scatter(
         x=fc_hist["ds_et"], y=fc_hist["trend"],
-        name="Trend", line=dict(color="#f59e0b", width=1.5),
+        name="Trend", line=dict(color="#b8860b", width=1.5),
     ), row=1, col=1)
 
     if "additive_terms" in fc_hist.columns:
         fig.add_trace(go.Scatter(
             x=fc_hist["ds_et"], y=fc_hist["additive_terms"],
-            name="Seasonality", line=dict(color="#c084fc", width=1.5),
-            fill="tozeroy", fillcolor="rgba(192,132,252,0.10)",
+            name="Seasonality", line=dict(color="#7b4fa6", width=1.5),
+            fill="tozeroy", fillcolor="rgba(123,79,166,0.10)",
         ), row=2, col=1)
 
     fig.update_layout(
-        paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
-        font=dict(family="DM Sans", color=TEXT_CLR),
+        paper_bgcolor=DARK_BG, plot_bgcolor="#ffffff",
+        font=dict(family="Georgia, serif", color=TEXT_CLR),
         xaxis2=dict(gridcolor=GRID_CLR),
         yaxis=dict(gridcolor=GRID_CLR, title="Price"),
         yaxis2=dict(gridcolor=GRID_CLR, title="Effect"),
-        legend=dict(bgcolor="rgba(0,0,0,0)"),
+        legend=dict(bgcolor="rgba(255,255,255,0.85)",
+                    bordercolor="#ddd5c8", borderwidth=1),
         margin=dict(l=60, r=20, t=40, b=20),
         height=380,
     )
@@ -780,17 +806,18 @@ st.markdown("""
     margin: 18px 0 8px 0;
 }
 .summary-block {
-    background: linear-gradient(135deg, #0f172a 0%, #111827 100%);
-    border: 1px solid #1e293b;
+    background: linear-gradient(135deg, #ffffff 0%, #f9f5ef 100%);
+    border: 1px solid #ddd5c8;
     border-radius: 10px;
     padding: 14px 16px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.05);
 }
 .summary-block-title {
     font-family: 'Space Mono', monospace;
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 1.5px;
-    color: #22d3ee;
+    color: #3a6ea5;
     margin-bottom: 8px;
     display: flex;
     align-items: center;
@@ -799,28 +826,28 @@ st.markdown("""
 .summary-block-title .dot {
     width: 6px; height: 6px;
     border-radius: 50%;
-    background: #22d3ee;
+    background: #3a6ea5;
     display: inline-block;
 }
 .summary-item {
-    font-family: 'DM Sans', sans-serif;
+    font-family: Georgia, serif;
     font-size: 12.5px;
-    color: #94a3b8;
-    padding: 3px 0;
-    border-bottom: 1px solid #1e293b;
+    color: #6b5e52;
+    padding: 4px 0;
+    border-bottom: 1px solid #ede8e0;
     display: flex;
     justify-content: space-between;
 }
 .summary-item:last-child { border-bottom: none; }
-.summary-item b { color: #e2e8f0; font-weight: 500; }
+.summary-item b { color: #2c2c2c; font-weight: 600; }
 .summary-note {
-    font-family: 'DM Sans', sans-serif;
+    font-family: Georgia, serif;
     font-size: 11.5px;
-    color: #475569;
+    color: #7a6e62;
     margin-top: 14px;
     padding: 10px 14px;
-    background: #0f172a;
-    border-left: 3px solid #334155;
+    background: #fff8f0;
+    border-left: 3px solid #c8a882;
     border-radius: 0 6px 6px 0;
 }
 </style>
@@ -994,7 +1021,7 @@ proba_dict = {"crash": proba[0], "squeeze": proba[1], "breakout": proba[2]}
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.markdown(f"""<div class="metric-card">
   <div class="metric-label">Last Close</div>
-  <div class="metric-value" style="color:#e2e8f0">${master['close'].iloc[-1]:.2f}</div>
+  <div class="metric-value" style="color:#1a1a2e">${master['close'].iloc[-1]:.2f}</div>
 </div>""", unsafe_allow_html=True)
 
 c2.markdown(f"""<div class="metric-card">
@@ -1029,7 +1056,7 @@ st.plotly_chart(make_probability_gauge(proba_dict), use_container_width=True)
 # PROPHET SECTION
 # ─────────────────────────────────────────────
 st.markdown("---")
-st.markdown("## 🔮 Prophet Forecast  <span style='font-size:13px;color:#64748b;font-family:DM Sans'>for reference only</span>", unsafe_allow_html=True)
+st.markdown("## 🔮 Prophet Forecast  <span style='font-size:13px;color:#8a7968;font-family:Georgia,serif'>for reference only</span>", unsafe_allow_html=True)
 
 if not PROPHET_AVAILABLE:
     st.warning("Prophet is not installed. Run `pip install prophet` to enable this section.")
@@ -1052,16 +1079,16 @@ else:
         next_p  = prophet_result["next_yhat"]
         chg_pct = prophet_result["trend_chg_pct"]
         sig     = prophet_result["prophet_signal"]
-        sig_color = "#22c55e" if "UP" in sig else "#ef4444" if "DOWN" in sig else "#f59e0b"
+        sig_color = "#1a7a3f" if "UP" in sig else "#c0392b" if "DOWN" in sig else "#b8860b"
 
         pa.markdown(f"""<div class="metric-card">
           <div class="metric-label">Last Close</div>
-          <div class="metric-value" style="color:#e2e8f0">${last_p:.2f}</div>
+          <div class="metric-value" style="color:#1a1a2e">${last_p:.2f}</div>
         </div>""", unsafe_allow_html=True)
 
         pb.markdown(f"""<div class="metric-card">
           <div class="metric-label">Next Bar Target</div>
-          <div class="metric-value" style="color:#22d3ee">${next_p:.2f}</div>
+          <div class="metric-value" style="color:#3a6ea5">${next_p:.2f}</div>
         </div>""", unsafe_allow_html=True)
 
         pc.markdown(f"""<div class="metric-card">
@@ -1080,11 +1107,11 @@ else:
         lo = prophet_result["next_yhat_lo"]
         hi = prophet_result["next_yhat_hi"]
         st.markdown(
-            f"<div style='font-family:Space Mono;font-size:12px;color:#64748b;"
+            f"<div style='font-family:Space Mono;font-size:12px;color:#8a7968;"
             f"text-align:center;padding:6px 0'>"
             f"{int(prophet_ci*100)}% Confidence Interval for next bar:  "
-            f"<span style='color:#e2e8f0'>${lo:.2f}</span> — "
-            f"<span style='color:#e2e8f0'>${hi:.2f}</span>"
+            f"<span style='color:#1a1a2e'>${lo:.2f}</span> — "
+            f"<span style='color:#1a1a2e'>${hi:.2f}</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -1123,9 +1150,10 @@ else:
             agree_color = "#f59e0b"
 
         st.markdown(
-            f"<div style='background:linear-gradient(135deg,#0f172a,#1e293b);"
-            f"border:1px solid {agree_color};border-radius:10px;padding:14px 20px;"
-            f"font-family:Space Mono;font-size:13px;color:{agree_color};text-align:center'>"
+            f"<div style='background:linear-gradient(135deg,#ffffff,#f5f0e8);"
+            f"border:1.5px solid {agree_color};border-radius:10px;padding:14px 20px;"
+            f"font-family:Georgia,serif;font-size:13px;color:{agree_color};text-align:center;"
+            f"box-shadow:0 2px 8px rgba(0,0,0,0.06)'>"
             f"CatBoost: <b>{cb_trend}</b> &nbsp;|&nbsp; Prophet: <b>{ph_signal}</b>"
             f"<br><span style='font-size:15px;margin-top:6px;display:block'>{agree_txt}</span>"
             f"</div>",
@@ -1146,7 +1174,7 @@ fig_fi = go.Figure(go.Bar(
     orientation="h",
     marker=dict(
         color=fi_top.values[::-1],
-        colorscale=[[0,"#1e3a5f"],[0.5,"#3b82f6"],[1,"#22d3ee"]],
+        colorscale=[[0,"#d4e8f5"],[0.5,"#3a6ea5"],[1,"#1a3a6e"]],
         showscale=False,
     ),
     text=[f"{v:.2f}" for v in fi_top.values[::-1]],
@@ -1154,8 +1182,8 @@ fig_fi = go.Figure(go.Bar(
     textfont=dict(size=10, color=TEXT_CLR),
 ))
 fig_fi.update_layout(
-    paper_bgcolor=DARK_BG, plot_bgcolor=DARK_BG,
-    font=dict(family="DM Sans", color=TEXT_CLR),
+    paper_bgcolor=DARK_BG, plot_bgcolor="#ffffff",
+    font=dict(family="Georgia, serif", color=TEXT_CLR),
     xaxis=dict(gridcolor=GRID_CLR, title="Importance Score"),
     yaxis=dict(gridcolor=GRID_CLR, tickfont=dict(size=11)),
     margin=dict(l=20, r=80, t=20, b=20),
@@ -1166,7 +1194,7 @@ st.plotly_chart(fig_fi, use_container_width=True)
 # ── Footer ──
 st.markdown("---")
 st.markdown(
-    "<div style='text-align:center;color:#334155;font-family:Space Mono;"
+    "<div style='text-align:center;color:#c8bfb4;font-family:Georgia,serif;"
     "font-size:11px;padding:12px'>CBRS MTF Predictor · For research only · "
     "Not financial advice</div>",
     unsafe_allow_html=True,
