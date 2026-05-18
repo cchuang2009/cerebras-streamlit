@@ -542,6 +542,7 @@ def run_prophet(
     _df_1m: pd.DataFrame,
     periods: int = 60,
     interval_width: float = 0.80,
+    cache_key: str = "",   # ← 移除底線，Streamlit 才會納入 hash
 ) -> dict | None:
     """
     Fit Prophet on 1m close prices (regular session only).
@@ -870,13 +871,14 @@ with st.sidebar:
     ticker = st.text_input("Ticker", value="CBRS").upper().strip()
 
     today      = date.today()
-    ipo_date   = date(2026, 5, 14)
+    # ── 修正：移除寫死的 ipo_date，改為動態 min（7天前，yfinance 1m 上限）──
+    min_date   = today - timedelta(days=7)
     start_date = st.date_input(
         "Start Date",
-        value=ipo_date,
-        min_value=ipo_date,
+        value=min_date,
+        min_value=date(2010, 1, 1),   # 任意過去日期皆可輸入
         max_value=today,
-        help="yfinance 1m data: max 7 days back",
+        help="yfinance 1m data: max 7 calendar days back",
     )
     end_date = st.date_input(
         "End Date",
@@ -1119,7 +1121,9 @@ with st.spinner("Training CatBoostClassifier …"):
         st.stop()
 
     model = train_model(
-        hash(str(X.values.tobytes()[:512])), X, y
+        # ── 修正：cache key 含 ticker + date range，換 ticker/日期強制重訓 ──
+        hash(f"{ticker}|{start_str}|{end_str}|" + str(X.values.tobytes()[:512])),
+        X, y
     )
 
 if model is None:
@@ -1191,6 +1195,7 @@ else:
             df_1m,
             periods        = prophet_periods,
             interval_width = prophet_ci,
+            cache_key      = f"{ticker}|{start_str}|{end_str}",
         )
 
     if prophet_result is None:
