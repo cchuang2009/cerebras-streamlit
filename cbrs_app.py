@@ -305,18 +305,56 @@ VOL_CLR   = "#3a6ea5"
 
 def make_price_volume_chart(df_1m: pd.DataFrame,
                              title: str = "CBRS — 1m Price & Volume") -> go.Figure:
-    # Filter regular session only
+    """
+    Use integer bar index on X-axis to eliminate overnight / weekend gaps.
+    Tick labels show actual ET timestamps at ~30-min intervals.
+    """
+    # ── Filter regular session ──
     reg = df_1m[
         (df_1m.index.time >= pd.Timestamp("09:30").time()) &
         (df_1m.index.time <= pd.Timestamp("16:00").time())
     ].copy()
-
     if reg.empty:
         reg = df_1m.copy()
 
+    # ── Integer index (no time gaps) ──
+    n   = len(reg)
+    idx = list(range(n))
+
+    # ── X-axis tick labels every 30 bars ──
+    tick_step  = 30
+    tickvals   = list(range(0, n, tick_step))
+    ticklabels = [
+        reg.index[i].strftime("%m/%d %H:%M")
+        for i in tickvals
+    ]
+
+    # ── Day boundary vertical lines (where date changes) ──
+    day_boundaries = []
+    for i in range(1, n):
+        if reg.index[i].date() != reg.index[i - 1].date():
+            day_boundaries.append(i)
+
+    # ── Candle colours ──
     colors = [UP_CLR if r >= 0 else DN_CLR
               for r in reg["close"].pct_change().fillna(0)]
 
+    # ── Indicators ──
+    tp    = (reg["high"] + reg["low"] + reg["close"]) / 3
+    dk    = reg.index.normalize()
+    vwap  = (tp * reg["volume"]).groupby(dk).cumsum() / (reg["volume"].groupby(dk).cumsum() + 1e-9)
+    ema9  = reg["close"].ewm(span=9,  adjust=False).mean()
+    ema21 = reg["close"].ewm(span=21, adjust=False).mean()
+
+    delta = reg["close"].diff()
+    gain  = delta.clip(lower=0).rolling(14, min_periods=1).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14, min_periods=1).mean()
+    rsi   = 100 - 100 / (1 + gain / (loss + 1e-9))
+
+    vol_30m         = reg["volume"].resample("30min").sum()
+    vol_30m_aligned = vol_30m.reindex(reg.index, method="ffill").values
+
+    # ── Figure ──
     fig = make_subplots(
         rows=3, cols=1,
         shared_xaxes=True,
@@ -325,85 +363,97 @@ def make_price_volume_chart(df_1m: pd.DataFrame,
         subplot_titles=("", "", ""),
     )
 
-    # ── Candlestick ──
+    # Row 1 — Price
     fig.add_trace(go.Candlestick(
-        x=reg.index, open=reg["open"], high=reg["high"],
-        low=reg["low"], close=reg["close"],
+        x=idx,
+        open=reg["open"].values, high=reg["high"].values,
+        low=reg["low"].values,   close=reg["close"].values,
         increasing_line_color=UP_CLR, decreasing_line_color=DN_CLR,
-        increasing_fillcolor=UP_CLR, decreasing_fillcolor=DN_CLR,
+        increasing_fillcolor=UP_CLR,  decreasing_fillcolor=DN_CLR,
         name="Price", line_width=1,
     ), row=1, col=1)
 
-    # ── VWAP ──
-    tp   = (reg["high"] + reg["low"] + reg["close"]) / 3
-    dk   = reg.index.normalize()
-    vwap = (tp * reg["volume"]).groupby(dk).cumsum() / (reg["volume"].groupby(dk).cumsum() + 1e-9)
     fig.add_trace(go.Scatter(
-        x=reg.index, y=vwap, name="VWAP",
+        x=idx, y=vwap.values, name="VWAP",
         line=dict(color="#b8860b", width=1.5, dash="dot"),
     ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=idx, y=ema9.values, name="EMA9",
+        line=dict(color="#3a6ea5", width=1),
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=idx, y=ema21.values, name="EMA21",
+        line=dict(color="#7b4fa6", width=1),
+    ), row=1, col=1)
 
-    # ── EMA 9 / 21 ──
-    ema9  = reg["close"].ewm(span=9,  adjust=False).mean()
-    ema21 = reg["close"].ewm(span=21, adjust=False).mean()
-    fig.add_trace(go.Scatter(x=reg.index, y=ema9,  name="EMA9",
-        line=dict(color="#3a6ea5", width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=reg.index, y=ema21, name="EMA21",
-        line=dict(color="#7b4fa6", width=1)), row=1, col=1)
+    # Row 2 — RSI
+    fig.add_trace(go.Scatter(
+        x=idx, y=rsi.values, name="RSI",
+        line=dict(color="#3a6ea5", width=1.5),
+    ), row=2, col=1)
+    fig.add_hline(y=70, line_dash="dot", line_color="#c0392b", line_width=0.8, row=2, col=1)
+    fig.add_hline(y=30, line_dash="dot", line_color="#1a7a3f", line_width=0.8, row=2, col=1)
 
-    # ── RSI ──
-    delta = reg["close"].diff()
-    gain  = delta.clip(lower=0).rolling(14, min_periods=1).mean()
-    loss  = (-delta.clip(upper=0)).rolling(14, min_periods=1).mean()
-    rsi   = 100 - 100 / (1 + gain / (loss + 1e-9))
-    fig.add_trace(go.Scatter(x=reg.index, y=rsi, name="RSI",
-        line=dict(color="#3a6ea5", width=1.5)), row=2, col=1)
-    fig.add_hline(y=70, line_dash="dot", line_color="#c0392b",
-                  line_width=0.8, row=2, col=1)
-    fig.add_hline(y=30, line_dash="dot", line_color="#1a7a3f",
-                  line_width=0.8, row=2, col=1)
-
-    # ── Volume ──
+    # Row 3 — Volume
     fig.add_trace(go.Bar(
-        x=reg.index, y=reg["volume"], name="Volume",
+        x=idx, y=reg["volume"].values, name="Volume",
         marker_color=colors, opacity=0.70,
     ), row=3, col=1)
-
-    # ── 30-min volume profile lines ──
-    vol_30m = reg["volume"].resample("30min").sum()
-    vol_30m_aligned = vol_30m.reindex(reg.index, method="ffill")
     fig.add_trace(go.Scatter(
-        x=reg.index, y=vol_30m_aligned,
+        x=idx, y=vol_30m_aligned,
         name="Vol 30m avg", fill="tozeroy",
         fillcolor="rgba(58,110,165,0.08)",
         line=dict(color=VOL_CLR, width=1, dash="dot"),
     ), row=3, col=1)
 
+    # ── Day boundary lines across all rows ──
+    for b in day_boundaries:
+        for row in [1, 2, 3]:
+            fig.add_vline(
+                x=b, line_dash="dash",
+                line_color="#a09080", line_width=1.2,
+                row=row, col=1,
+            )
+        # Date label at top
+        fig.add_annotation(
+            x=b + 2, y=1, yref="paper",
+            text=reg.index[b].strftime("%b %d"),
+            showarrow=False,
+            font=dict(size=10, color="#8a7968", family="Georgia, serif"),
+            xanchor="left",
+        )
+
     # ── Layout ──
+    axis_common = dict(
+        tickvals=tickvals,
+        ticktext=ticklabels,
+        tickangle=-45,
+        tickfont=dict(size=9, family="Space Mono"),
+        gridcolor=GRID_CLR,
+        zeroline=False,
+        showspikes=True,
+        spikecolor="#a09080",
+        spikethickness=1,
+    )
+
     fig.update_layout(
         title=dict(text=title, font=dict(family="Georgia, serif", size=14, color="#1a1a2e")),
         paper_bgcolor=DARK_BG,
         plot_bgcolor="#ffffff",
         font=dict(family="Georgia, serif", color=TEXT_CLR),
         xaxis_rangeslider_visible=False,
-        legend=dict(bgcolor="rgba(255,255,255,0.8)",
+        legend=dict(bgcolor="rgba(255,255,255,0.85)",
                     bordercolor="#ddd5c8", borderwidth=1,
                     font=dict(size=11)),
-        margin=dict(l=60, r=20, t=50, b=20),
-        height=680,
+        margin=dict(l=60, r=20, t=50, b=60),
+        height=700,
+        xaxis =dict(**axis_common),
+        xaxis2=dict(**axis_common),
+        xaxis3=dict(**axis_common),
     )
-    for i in range(1, 4):
-        fig.update_xaxes(
-            gridcolor=GRID_CLR, zeroline=False,
-            showspikes=True, spikecolor="#475569",
-            spikethickness=1, row=i, col=1,
-        )
-        fig.update_yaxes(
-            gridcolor=GRID_CLR, zeroline=False, row=i, col=1,
-        )
+    fig.update_yaxes(gridcolor=GRID_CLR, zeroline=False)
     fig.update_yaxes(title_text="Price",  row=1, col=1, title_font_size=11)
-    fig.update_yaxes(title_text="RSI",    row=2, col=1, title_font_size=11,
-                     range=[0,100])
+    fig.update_yaxes(title_text="RSI",    row=2, col=1, title_font_size=11, range=[0, 100])
     fig.update_yaxes(title_text="Volume", row=3, col=1, title_font_size=11)
     return fig
 
@@ -413,9 +463,9 @@ def make_volume_profile_chart(df_1m: pd.DataFrame) -> go.Figure:
         (df_1m.index.time >= pd.Timestamp("09:30").time()) &
         (df_1m.index.time <= pd.Timestamp("16:00").time())
     ].copy()
-    # reg["interval_30m"] = ((reg.index.hour*60 + reg.index.minute - 570)//30).clip(0, 12)
     intervals = (reg.index.hour * 60 + reg.index.minute - 570) // 30
     reg["interval_30m"] = np.clip(intervals, 0, 12)
+
     LABELS = {
         0:"09:30",1:"10:00",2:"10:30",3:"11:00",4:"11:30",5:"12:00",
         6:"12:30",7:"13:00",8:"13:30",9:"14:00",10:"14:30",11:"15:00",12:"15:30"
@@ -592,71 +642,106 @@ def run_prophet(
 
 
 def make_prophet_chart(result: dict, ticker: str) -> go.Figure:
-    """Plotly chart: actual price + Prophet fitted line + forecast cone."""
-    fc_hist = result["fc_hist"]
-    fc_fut  = result["fc_fut"]
-    actual  = result["actual_df"]
+    """
+    Prophet forecast chart using integer bar index on X-axis,
+    eliminating overnight / weekend gaps from the display.
+    Historical bars + forecast bars are concatenated into one
+    continuous sequence; a vertical line marks the boundary.
+    """
+    fc_hist = result["fc_hist"].reset_index(drop=True)
+    fc_fut  = result["fc_fut"].reset_index(drop=True)
+    actual  = result["actual_df"].reset_index(drop=True)
     periods = result["periods"]
+
+    n_hist = len(actual)        # number of historical bars
+    n_fut  = len(fc_fut)        # number of forecast bars
+    n_total = n_hist + n_fut
+
+    # ── Integer indices ──
+    idx_hist = list(range(n_hist))
+    idx_fut  = list(range(n_hist, n_total))
+
+    # ── Build unified tick labels every 30 bars ──
+    tick_step = 30
+    all_ds = list(actual["ds"]) + list(fc_fut["ds"]) if n_fut else list(actual["ds"])
+    tickvals  = list(range(0, n_total, tick_step))
+    ticklabels = []
+    for i in tickvals:
+        if i < len(all_ds):
+            ts = pd.to_datetime(all_ds[i])
+            ticklabels.append(ts.strftime("%m/%d %H:%M"))
+        else:
+            ticklabels.append("")
+
+    # ── Day boundary lines within historical section ──
+    day_boundaries = []
+    for i in range(1, n_hist):
+        d_prev = pd.to_datetime(actual["ds"].iloc[i - 1]).date()
+        d_curr = pd.to_datetime(actual["ds"].iloc[i]).date()
+        if d_curr != d_prev:
+            day_boundaries.append(i)
 
     fig = go.Figure()
 
-    # ── Actual price ──
+    # ── Actual close ──
     fig.add_trace(go.Scatter(
-        x=pd.to_datetime(actual["ds"]).dt.tz_localize(ET),
-        y=actual["y"],
+        x=idx_hist, y=actual["y"].values,
         name="Actual Close",
         line=dict(color="#2c2c2c", width=1.5),
         opacity=0.9,
     ))
 
-    # ── Prophet fitted (historical) ──
+    # ── Prophet fitted line ──
     fig.add_trace(go.Scatter(
-        x=fc_hist["ds_et"], y=fc_hist["yhat"],
+        x=idx_hist, y=fc_hist["yhat"].values,
         name="Prophet Fit",
         line=dict(color="#7b4fa6", width=1.5, dash="dot"),
     ))
 
     # ── Historical confidence band ──
+    x_band_h = idx_hist + idx_hist[::-1]
+    y_band_h = (list(fc_hist["yhat_upper"].values) +
+                list(fc_hist["yhat_lower"].values[::-1]))
     fig.add_trace(go.Scatter(
-        x=pd.concat([fc_hist["ds_et"], fc_hist["ds_et"].iloc[::-1]]),
-        y=pd.concat([fc_hist["yhat_upper"], fc_hist["yhat_lower"].iloc[::-1]]),
+        x=x_band_h, y=y_band_h,
         fill="toself",
         fillcolor="rgba(123,79,166,0.08)",
         line=dict(color="rgba(0,0,0,0)"),
-        name="Fit Band",
-        showlegend=False,
+        name="Fit Band", showlegend=False,
     ))
 
-    if len(fc_fut) > 0:
-        # ── Forecast line ──
-        # Connect last actual point to forecast
-        connect_x = [fc_hist["ds_et"].iloc[-1], fc_fut["ds_et"].iloc[0]]
-        connect_y = [fc_hist["yhat"].iloc[-1],  fc_fut["yhat"].iloc[0]]
+    if n_fut > 0:
+        # ── Connector: last hist bar → first forecast bar ──
         fig.add_trace(go.Scatter(
-            x=connect_x, y=connect_y,
+            x=[n_hist - 1, n_hist],
+            y=[fc_hist["yhat"].iloc[-1], fc_fut["yhat"].iloc[0]],
             line=dict(color="#3a6ea5", width=2),
             showlegend=False,
         ))
+
+        # ── Forecast line ──
         fig.add_trace(go.Scatter(
-            x=fc_fut["ds_et"], y=fc_fut["yhat"],
+            x=idx_fut, y=fc_fut["yhat"].values,
             name=f"Forecast (+{periods}m)",
             line=dict(color="#3a6ea5", width=2.5),
             mode="lines",
         ))
 
-        # ── Forecast cone ──
+        # ── Forecast CI cone ──
+        x_cone = idx_fut + idx_fut[::-1]
+        y_cone = (list(fc_fut["yhat_upper"].values) +
+                  list(fc_fut["yhat_lower"].values[::-1]))
         fig.add_trace(go.Scatter(
-            x=pd.concat([fc_fut["ds_et"], fc_fut["ds_et"].iloc[::-1]]),
-            y=pd.concat([fc_fut["yhat_upper"], fc_fut["yhat_lower"].iloc[::-1]]),
+            x=x_cone, y=y_cone,
             fill="toself",
             fillcolor="rgba(58,110,165,0.10)",
             line=dict(color="rgba(0,0,0,0)"),
-            name=f"{int(result.get('interval_width',0.8)*100)}% CI",
+            name=f"{int(result.get('interval_width', 0.8) * 100)}% CI",
         ))
 
         # ── Next-bar target marker ──
         fig.add_trace(go.Scatter(
-            x=[fc_fut["ds_et"].iloc[0]],
+            x=[n_hist],
             y=[result["next_yhat"]],
             mode="markers+text",
             marker=dict(size=10, color="#3a6ea5",
@@ -667,38 +752,71 @@ def make_prophet_chart(result: dict, ticker: str) -> go.Figure:
             name="Next bar target",
         ))
 
-        # ── Vertical separator ──
+        # ── Hist / Forecast boundary line ──
         fig.add_vline(
-            x=fc_fut["ds_et"].iloc[0].timestamp() * 1000,
-            line_dash="dash", line_color="#a09080", line_width=1,
+            x=n_hist - 0.5,
+            line_dash="dash", line_color="#a09080", line_width=1.2,
             annotation_text=" Forecast →",
             annotation_font_color="#8a7968",
             annotation_font_size=11,
+            annotation_position="top right",
+        )
+
+    # ── Day boundary lines ──
+    for b in day_boundaries:
+        fig.add_vline(
+            x=b - 0.5,
+            line_dash="dot", line_color="#c8bfb4", line_width=1,
+        )
+        fig.add_annotation(
+            x=b + 1, y=1, yref="paper",
+            text=pd.to_datetime(actual["ds"].iloc[b]).strftime("%b %d"),
+            showarrow=False,
+            font=dict(size=10, color="#8a7968", family="Georgia, serif"),
+            xanchor="left",
         )
 
     fig.update_layout(
         title=dict(
-            text=f"{ticker} — Prophet Forecast  (intraday seasonality + volume regressor)",
+            text=f"{ticker} — Prophet Forecast  (intraday · no gap)",
             font=dict(family="Georgia, serif", size=13, color="#1a1a2e"),
         ),
         paper_bgcolor=DARK_BG, plot_bgcolor="#ffffff",
         font=dict(family="Georgia, serif", color=TEXT_CLR),
-        xaxis=dict(gridcolor=GRID_CLR, zeroline=False,
-                   showspikes=True, spikecolor="#a09080"),
+        xaxis=dict(
+            tickvals=tickvals, ticktext=ticklabels,
+            tickangle=-45,
+            tickfont=dict(size=9, family="Space Mono"),
+            gridcolor=GRID_CLR, zeroline=False,
+            showspikes=True, spikecolor="#a09080", spikethickness=1,
+        ),
         yaxis=dict(gridcolor=GRID_CLR, zeroline=False, title="Price (USD)"),
         legend=dict(bgcolor="rgba(255,255,255,0.85)",
                     bordercolor="#ddd5c8", borderwidth=1,
                     font=dict(size=11)),
-        margin=dict(l=60, r=20, t=55, b=30),
-        height=480,
+        margin=dict(l=60, r=20, t=55, b=60),
+        height=500,
         hovermode="x unified",
     )
     return fig
 
 
 def make_prophet_components_chart(result: dict) -> go.Figure:
-    """Show Prophet trend + intraday seasonality components."""
-    fc_hist = result["fc_hist"]
+    """
+    Prophet trend + seasonality components — integer index,
+    no non-trading gaps.
+    """
+    fc_hist = result["fc_hist"].reset_index(drop=True)
+    n       = len(fc_hist)
+    idx     = list(range(n))
+
+    # Tick labels every 30 bars
+    tick_step  = 30
+    tickvals   = list(range(0, n, tick_step))
+    ticklabels = [
+        pd.to_datetime(fc_hist["ds"].iloc[i]).strftime("%m/%d %H:%M")
+        for i in tickvals
+    ]
 
     fig = make_subplots(
         rows=2, cols=1,
@@ -708,31 +826,36 @@ def make_prophet_components_chart(result: dict) -> go.Figure:
     )
 
     fig.add_trace(go.Scatter(
-        x=fc_hist["ds_et"], y=fc_hist["trend"],
+        x=idx, y=fc_hist["trend"].values,
         name="Trend", line=dict(color="#b8860b", width=1.5),
     ), row=1, col=1)
 
     if "additive_terms" in fc_hist.columns:
         fig.add_trace(go.Scatter(
-            x=fc_hist["ds_et"], y=fc_hist["additive_terms"],
+            x=idx, y=fc_hist["additive_terms"].values,
             name="Seasonality", line=dict(color="#7b4fa6", width=1.5),
             fill="tozeroy", fillcolor="rgba(123,79,166,0.10)",
         ), row=2, col=1)
 
+    axis_common = dict(
+        tickvals=tickvals, ticktext=ticklabels,
+        tickangle=-45,
+        tickfont=dict(size=9, family="Space Mono"),
+        gridcolor=GRID_CLR,
+    )
     fig.update_layout(
         paper_bgcolor=DARK_BG, plot_bgcolor="#ffffff",
         font=dict(family="Georgia, serif", color=TEXT_CLR),
-        xaxis2=dict(gridcolor=GRID_CLR),
-        yaxis=dict(gridcolor=GRID_CLR, title="Price"),
+        xaxis =dict(**axis_common),
+        xaxis2=dict(**axis_common),
+        yaxis =dict(gridcolor=GRID_CLR, title="Price"),
         yaxis2=dict(gridcolor=GRID_CLR, title="Effect"),
         legend=dict(bgcolor="rgba(255,255,255,0.85)",
                     bordercolor="#ddd5c8", borderwidth=1),
-        margin=dict(l=60, r=20, t=40, b=20),
-        height=380,
+        margin=dict(l=60, r=20, t=40, b=60),
+        height=400,
     )
-    for i in range(1, 3):
-        fig.update_xaxes(gridcolor=GRID_CLR, row=i, col=1)
-        fig.update_yaxes(gridcolor=GRID_CLR, row=i, col=1)
+    fig.update_yaxes(gridcolor=GRID_CLR)
     return fig
 
 
