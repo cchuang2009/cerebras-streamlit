@@ -22,3 +22,21 @@ v5, non-trading interval onitted
 | `make_prophet_components_chart` | `fc_hist["ds_et"]` 時間軸 | 整數序號 + `tickvals/ticktext` |
 | Tick labels | 無 | 每 30 bar 顯示 `MM/DD HH:MM` |
 | 多日分隔 | 無 | `add_vline` 虛線 + 日期 annotation |
+
+v6. 「Beta」（β）Case Included
+---
+|改善 Imprvement| 位置 Position |說明 Details|
+|---------|------|--------|
+|ATR 動態標籤|label_bars()|use_atr=True 時閾值隨 ATR 浮動，高 Beta 股不再被固定 ±0.6% 淹沒|
+|Volatility |Regimeadd_highbeta_features()|0=低波 / 1=中波 / 2=高爆，驅動動態 Gate|
+|Volume Acceleration|同上|hb_vol_accel + hb_vol_burst，爆發前訊號|
+|VWAP Z-Score|同上|拉伸後回歸的量化指標|
+|Opening Range|同上|前 15 分鐘高低點 + 突破 / 跌破 flag|
+|RS vs SPY|同上|相對強弱，可開關|
+|動態 Confidence Gate|dynamic_confidence_gate()高爆 +10%，低波 -5%|
+|高 Beta CatBoost 參數|train_model()|depth↓ lr↓ iter↑ l2↑ subsample 0.7|
+|Prophet changepoint|run_prophet()|scale 0.3→0.8，n_changepoints 30，range 0.95|
+|Vol Regime 卡片|預測區|第 6 張卡片顯示當前 regime + 實際生效 Gate|
+|Sidebar 開關|use_atr_lbl / use_spy_rs|可分別開關 ATR 標籤與 SPY RS|
+|Catboost option|bootstrap_type| "Bernoulli" and omit bagging_temperature|
+
