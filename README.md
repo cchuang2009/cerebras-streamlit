@@ -33,7 +33,7 @@ v6. 「Beta」（β）Case Included
 |VWAP Z-Score|同上|拉伸後回歸的量化指標|
 |Opening Range|同上|前 15 分鐘高低點 + 突破 / 跌破 flag|
 |RS vs SPY|同上|相對強弱，可開關|
-|動態 Confidence Gate|dynamic_confidence_gate()高爆 +10%，低波 -5%|
+|動態 Confidence Gate|dynamic_confidence_gate()|高爆 +10%，低波 -5%|
 |高 Beta CatBoost 參數|train_model()|depth↓ lr↓ iter↑ l2↑ subsample 0.7|
 |Prophet changepoint|run_prophet()|scale 0.3→0.8，n_changepoints 30，range 0.95|
 |Vol Regime 卡片|預測區|第 6 張卡片顯示當前 regime + 實際生效 Gate|
