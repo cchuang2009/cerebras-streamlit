@@ -1,7 +1,7 @@
 # cerebras-streamlit
 Analysis of the Cerebras, python, streamlit, prophet
 
-# Summaru Panel
+# Summary Panel
 
 | 卡片 | 說明 |
 |------|------|
