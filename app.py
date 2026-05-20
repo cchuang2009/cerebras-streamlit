@@ -348,7 +348,7 @@ with st.sidebar:
     if not PROPHET_AVAILABLE:
         st.caption("⚠️ `pip install prophet` to enable")
     st.markdown("---")
-    run_btn = st.button("🚀 Run Analysis", use_container_width=True, type="primary")
+    run_btn = st.button("🚀 Run Analysis", width='stretch', type="primary")
 
 # ─────────────────────────────────────────────
 # TITLE + SUMMARY PANEL
@@ -473,8 +473,8 @@ df_plot = df_1m if selected_date=="All" else \
     df_1m[df_1m.index.date == date.fromisoformat(selected_date)]
 
 st.plotly_chart(chart_price(df_plot, f"{ticker} — {selected_date} (1m)"),
-                use_container_width=True)
-st.plotly_chart(chart_volume_profile(df_1m), use_container_width=True)
+                width='stretch')
+st.plotly_chart(chart_volume_profile(df_1m), width='stretch')
 st.markdown("---")
 
 # ─────────────────────────────────────────────
@@ -566,7 +566,7 @@ c6.markdown(f"""<div class="metric-card">
 </div>""", unsafe_allow_html=True)
 
 st.markdown("<br>", unsafe_allow_html=True)
-st.plotly_chart(chart_proba(result), use_container_width=True)
+st.plotly_chart(chart_proba(result), width='stretch')
 
 # ─────────────────────────────────────────────
 # PROPHET
@@ -616,7 +616,7 @@ else:
                     f"<b style='color:#1a1a2e'>${hi:.2f}</b></div>",
                     unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
-        st.plotly_chart(chart_prophet(ph, ticker), use_container_width=True)
+        st.plotly_chart(chart_prophet(ph, ticker), width='stretch')
 
         agr = model_agreement(trend, ph["prophet_signal"])
         st.markdown(
@@ -634,7 +634,7 @@ else:
 st.markdown("---")
 st.markdown("## 📊 Top-20 Feature Importance")
 fi = feature_importance(model, feat_cols, top_n=20)
-st.plotly_chart(chart_fi(fi), use_container_width=True)
+st.plotly_chart(chart_fi(fi), width='stretch')
 
 st.markdown("<div style='text-align:center;color:#c8bfb4;font-family:Georgia,serif;"
             "font-size:11px;padding:12px'>MTF Predictor · Research only · Not financial advice</div>",
