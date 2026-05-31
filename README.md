@@ -43,6 +43,7 @@ v6. 「Beta」（β）Case Included
 v7. 新增至 cbrs_app.py 的內容
 ---
 |新增位置|內容|
+|------|------------|
 |get_ticker_info()|從 yfinance 抓 Beta、Float、Short Ratio、IPO Date|
 |MarketCapget_news_sentiment()|免費新聞情緒評分，偵測 S&P 入指 / 鎖定期解禁關鍵字|
 |add_ipo_features_1m()|10 個 IPO 專屬特徵，直接加到 1m master DataFrame|
