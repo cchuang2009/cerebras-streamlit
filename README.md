@@ -40,3 +40,11 @@ v6. 「Beta」（β）Case Included
 |Sidebar 開關|use_atr_lbl / use_spy_rs|可分別開關 ATR 標籤與 SPY RS|
 |Catboost option|bootstrap_type| "Bernoulli" and omit bagging_temperature|
 
+v7. 新增至 cbrs_app.py 的內容
+---
+|新增位置|內容|
+|get_ticker_info()|從 yfinance 抓 Beta、Float、Short Ratio、IPO Date|
+|MarketCapget_news_sentiment()|免費新聞情緒評分，偵測 S&P 入指 / 鎖定期解禁關鍵字|
+|add_ipo_features_1m()|10 個 IPO 專屬特徵，直接加到 1m master DataFrame|
+|build_feature_matrix()|新增 info / sentiment 參數，內部呼叫 add_ipo_features_1m|
+|主流程|自動 fetch info + sentiment，顯示 Beta/MarketCap/Float/Short/News 資訊欄，新聞標題 expander|
